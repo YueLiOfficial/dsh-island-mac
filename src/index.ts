@@ -104,9 +104,16 @@ export function apply(ctx: Context, config: Config): void {
     if (pending === null || disposed) return
     const snapshot = pending
     pending = null
-    if (snapshot.state === 'idle') return
     if (snapshot.state === 'done') {
       send({ type: 'done', reason: snapshot.message ?? '', ok: snapshot.ok })
+      return
+    }
+    if (snapshot.state === 'idle') {
+      // Latent-trap guard. `bye` is sent DIRECTLY by the idle timer, not through
+      // this queue, precisely so that resetting the machine to `idle` can never
+      // swallow the message that collapses the island. If a future change
+      // queues an idle snapshot instead, it must still reach the helper.
+      send({ type: 'bye' })
       return
     }
     send({
@@ -135,6 +142,10 @@ export function apply(ctx: Context, config: Config): void {
         if (next === null) return
         try {
           next.send(encodeMessage(message))
+          // Reset the idle clock on the reconnect path too, otherwise a task
+          // that only ever sends after a reconnect would be collapsed by the
+          // stale timer it inherited.
+          bumpIdle()
         } catch {
           log.warn('island: send failed after reconnect')
         }
