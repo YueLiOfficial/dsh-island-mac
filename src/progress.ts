@@ -56,13 +56,22 @@ export class ProgressMachine {
   /**
    * Begin a new turn. Resets to the 5% floor and clears any precise lock —
    * progress is per-turn, so last turn's precise value must not leak forward.
+   *
+   * Idempotent for a turn already in progress: `session/event` replays history
+   * on attach, so the same `turn/start` can arrive more than once. Re-resetting
+   * on a replay would make the displayed value jump backwards, violating the
+   * monotonicity invariant. Only a genuinely different turn resets.
    */
   startTurn(turn: number): ProgressSnapshot {
+    if (this.turn !== null && this.turn === turn && this.state !== 'idle') {
+      return this.snapshot()
+    }
+
     this.state = 'estimated'
     this.percent = TURN_START_PERCENT
     this.mode = 'estimated'
     this.message = undefined
-    this.turn = Number.isFinite(turn) ? turn : null
+    this.turn = turn
     this.ok = true
     return this.snapshot()
   }
