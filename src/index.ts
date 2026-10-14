@@ -1,3 +1,4 @@
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -71,6 +72,30 @@ export function defaultHelperPath(): string {
  * `ctx.effect` whose async disposer is the only path that guarantees the
  * helper reaches a stopped state.
  */
+/**
+ * Best-effort startup marker.
+ *
+ * The GUI writes no file logs, so "did apply() actually run?" is otherwise
+ * unanswerable from outside the process — and an unresolved mount row fails
+ * without producing anything observable. This file is the cheapest possible
+ * positive evidence: if it exists with a timestamp newer than the app launch,
+ * the plugin loaded and apply() ran.
+ *
+ * Never throws: a diagnostic must not be the reason a plugin fails to load.
+ */
+function writeStartupMarker(helperPath: string): void {
+  try {
+    const dir = join(homedir(), 'Library', 'Application Support', 'dsh-island')
+    mkdirSync(dir, { recursive: true, mode: 0o700 })
+    writeFileSync(
+      join(dir, 'plugin-applied.json'),
+      `${JSON.stringify({ at: new Date().toISOString(), pid: process.pid, helperPath }, null, 2)}\n`,
+    )
+  } catch {
+    /* diagnostics must never break loading */
+  }
+}
+
 export function apply(ctx: Context, config: Config): void {
   const socketPath = config.socketPath && config.socketPath.length > 0 ? config.socketPath : defaultSocketPath()
   const helperPath = config.helperPath && config.helperPath.length > 0 ? config.helperPath : defaultHelperPath()
@@ -79,6 +104,7 @@ export function apply(ctx: Context, config: Config): void {
   const graceMs = config.graceMs ?? 3_000
 
   const log = ctx.logger(name)
+  writeStartupMarker(helperPath)
   const machine = new ProgressMachine()
 
   // The supervisor owns the child process, including the restart/teardown
