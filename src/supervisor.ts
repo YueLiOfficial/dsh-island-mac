@@ -64,7 +64,10 @@ export class HelperSupervisor {
 
     if (this.inFlight !== null) {
       await this.inFlight
-      return this.disposed ? null : (this.handle?.sender ?? null)
+      // Re-check liveness: the socket can close between the await and here, and
+      // handing back a dead sender would silently drop one frame.
+      const shared = this.disposed ? null : (this.handle?.sender ?? null)
+      return shared !== null && shared.alive ? shared : null
     }
 
     const run = (async (): Promise<void> => {
@@ -77,7 +80,11 @@ export class HelperSupervisor {
       const token = ++this.token
       const handle = await startHelper({
         helperPath: this.options.helperPath,
-        ...(this.options.helperArgs === undefined ? {} : { helperArgs: this.options.helperArgs }),
+        // The socket path is ALWAYS passed positionally. The native helper's
+        // contract is "socket path from argv[1], else the built-in default", so
+        // omitting it would leave a non-default Config.socketPath permanently
+        // unreachable — and every send would retire and respawn the child.
+        helperArgs: [...(this.options.helperArgs ?? []), this.options.socketPath],
         socketPath: this.options.socketPath,
         connectTimeoutMs: this.options.connectTimeoutMs,
         graceMs: this.options.graceMs,
@@ -101,7 +108,8 @@ export class HelperSupervisor {
       if (this.inFlight === run) this.inFlight = null
     }
 
-    return this.disposed ? null : (this.handle?.sender ?? null)
+    const adopted = this.disposed ? null : (this.handle?.sender ?? null)
+    return adopted !== null && adopted.alive ? adopted : null
   }
 
   /**

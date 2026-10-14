@@ -245,7 +245,12 @@ export function apply(ctx: Context, config: Config): void {
   ctx.effect(() => {
     // Kick off the first connect. `ensureSender` is the single entry point for
     // both startup and reconnect, so there is exactly one place that can spawn.
-    void ensureSender()
+    // The `.catch` is defence in depth: `ensureSender` is documented never to
+    // reject, but an unhandled rejection here would terminate the DSH session,
+    // so the cost of the guard is nothing and the cost of being wrong is total.
+    void ensureSender().catch((err: unknown) => {
+      log.warn('island: initial helper start failed: %s', String(err))
+    })
 
     return async () => {
       disposed = true

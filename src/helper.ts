@@ -12,10 +12,11 @@ export interface HelperOptions {
   graceMs: number
   onStderr?: (line: string) => void
   /**
-   * Optional stdout sink. Omit it and the child's stdout is `'ignore'`, which
-   * is the safe default: an undrained pipe wedges a chatty helper.
+   * Optional stdout sink, receiving RAW chunks (no `setEncoding` is applied).
+   * Omit it and the child's stdout is `'ignore'`, which is the safe default:
+   * an undrained pipe wedges a chatty helper.
    */
-  onStdout?: (chunk: string) => void
+  onStdout?: (chunk: Buffer) => void
 }
 
 export interface HelperHandle {
@@ -73,17 +74,41 @@ function signalTree(child: ChildProcess, signal: NodeJS.Signals): void {
 }
 
 /**
+ * Wraps a log sink so a throwing sink cannot escape this module's
+ * "never rejects / never throws" contract.
+ *
+ * A throw from the sink inside a stream listener surfaces as an uncaught
+ * exception (exit 43), and inside the spawn continuation as an unhandled
+ * rejection — either of which terminates the whole DSH process. Losing a log
+ * line is strictly better than losing the user's session.
+ */
+function safeSink<T>(sink: ((value: T) => void) | undefined): (value: T) => void {
+  return (value: T): void => {
+    try {
+      sink?.(value)
+    } catch {
+      /* a broken logger must not take the session down */
+    }
+  }
+}
+
+/**
  * Starts the native helper and connects to it as a client.
  *
- * Never rejects. A missing binary (the common case before the Swift layer is
- * built) is a degraded state, not a plugin failure: the plugin loads, logs a
- * clear reason, and the rest of the harness keeps working. `sender` is null in
- * that case and the caller simply has nowhere to send progress.
+ * Never rejects and never throws — not for a missing binary, not for a
+ * malformed path, not for a throwing log sink. A missing binary (the common
+ * case before the Swift layer is built) is a degraded state, not a plugin
+ * failure: the plugin loads, logs a clear reason, and the rest of the harness
+ * keeps working. `sender` is null in that case and the caller simply has
+ * nowhere to send progress.
  *
  * On return, the caller owns teardown: `dispose()` is the only thing that
  * guarantees the child reaches a stopped state.
  */
 export async function startHelper(opts: HelperOptions): Promise<HelperHandle> {
+  const logErr = safeSink(opts.onStderr)
+  const logOut = safeSink(opts.onStdout)
+
   // The socket lives in a private directory so a predictable path cannot be
   // squatted or read by another user.
   const dir = dirname(opts.socketPath)
@@ -113,7 +138,7 @@ export async function startHelper(opts: HelperOptions): Promise<HelperHandle> {
       env: scrubbedEnv(),
     })
   } catch (err) {
-    opts.onStderr?.(`helper spawn threw: ${(err as Error).message}`)
+    logErr(`helper spawn threw: ${(err as Error).message}`)
     return {
       sender: null,
       async dispose(): Promise<void> {
@@ -122,7 +147,10 @@ export async function startHelper(opts: HelperOptions): Promise<HelperHandle> {
     }
   }
 
-  if (child.stdout) child.stdout.on('data', (chunk: string) => opts.onStdout?.(chunk))
+  if (child.stdout) {
+    // No setEncoding: the sink is documented as receiving raw chunks.
+    child.stdout.on('data', (chunk: Buffer) => logOut(chunk))
+  }
 
   let exited = false
   const exitWaiters: Array<() => void> = []
@@ -154,7 +182,7 @@ export async function startHelper(opts: HelperOptions): Promise<HelperHandle> {
   // ENOENT and friends arrive here. Swallow the event: an unhandled 'error'
   // on a ChildProcess would crash the host process.
   child.on('error', (err: Error) => {
-    opts.onStderr?.(`helper spawn failed: ${err.message}`)
+    logErr(`helper spawn failed: ${err.message}`)
     // 'error' does NOT imply the process is gone (Node also emits it for a
     // failed kill), so it must not be treated as proof of exit on its own.
     // It does mean no 'close'/'exit' may ever arrive, so release waiters —
@@ -177,17 +205,17 @@ export async function startHelper(opts: HelperOptions): Promise<HelperHandle> {
       while ((newlineAt = buffer.indexOf('\n')) !== -1) {
         const line = buffer.slice(0, newlineAt)
         buffer = buffer.slice(newlineAt + 1)
-        if (line.length > 0) opts.onStderr?.(line)
+        if (line.length > 0) logErr(line)
       }
       if (buffer.length > 8192) {
-        opts.onStderr?.(`${buffer.slice(0, 8192)}…[truncated]`)
+        logErr(`${buffer.slice(0, 8192)}…[truncated]`)
         buffer = ''
       }
     })
     // Flush a trailing partial line so the last diagnostic is not lost.
     child.stderr.on('end', () => {
       if (buffer.length > 0) {
-        opts.onStderr?.(buffer)
+        logErr(buffer)
         buffer = ''
       }
     })
@@ -214,7 +242,7 @@ export async function startHelper(opts: HelperOptions): Promise<HelperHandle> {
   if (sender === null && !exited && child.pid !== undefined) {
     // Leave the process running: its stderr is the only diagnostic the user
     // has, and killing it here would hide the cause.
-    opts.onStderr?.(`helper did not accept a connection within ${opts.connectTimeoutMs}ms`)
+    logErr(`helper did not accept a connection within ${opts.connectTimeoutMs}ms`)
   }
 
   let teardown: Promise<void> | null = null
@@ -247,7 +275,7 @@ export async function startHelper(opts: HelperOptions): Promise<HelperHandle> {
         if (!(await waitForExit(opts.graceMs))) {
           // Report rather than silently claim success: a process that survives
           // SIGKILL for a full grace period is a fact the operator needs.
-          opts.onStderr?.(
+          logErr(
             `helper pid ${String(child.pid)} did not exit within ${opts.graceMs}ms after SIGKILL`,
           )
         }

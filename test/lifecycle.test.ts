@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
-import { mkdtempSync, chmodSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, chmodSync, writeFileSync, readFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { startHelper } from '../src/helper.ts'
@@ -292,5 +292,95 @@ test('supervisor.dispose 并发调用时每个调用都等到停稳', async () =
   ])
 
   assert.deepEqual(observed.filter(Boolean), [], '有 supervisor.dispose 调用在进程存活时返回')
+  s.cleanup()
+})
+
+test('socket 路径会作为最后一个参数传给 helper（否则非默认路径永远无法通信）', async () => {
+  const s = scratch()
+  const rec = join(s.dir, 'record-argv.mjs')
+  writeFileSync(
+    rec,
+    [
+      "import { writeFileSync, unlinkSync, existsSync } from 'node:fs'",
+      "import { createServer } from 'node:net'",
+      // argv 形态：真实 helper 是 [binary, socket]；用 node 当 helper 时是
+      // [node, rec.mjs, socket]。两种情况下 socket 都是**最后一个**参数，
+      // 所以断言最后一项，而不是写死下标 1。
+      "writeFileSync(process.env.ARGV_OUT, JSON.stringify(process.argv))",
+      'const socketPath = process.argv.at(-1)',
+      'if (existsSync(socketPath)) { try { unlinkSync(socketPath) } catch {} }',
+      "createServer((c) => { c.on('error', () => {}); c.resume() }).listen(socketPath, () => {})",
+      "process.on('SIGTERM', () => process.exit(0))",
+      '',
+    ].join('\n'),
+  )
+  const out = join(s.dir, 'argv.json')
+  const prevOut = process.env.ARGV_OUT
+  process.env.ARGV_OUT = out
+
+  const sup = new HelperSupervisor({
+    helperPath: process.execPath,
+    helperArgs: [rec],
+    socketPath: s.sock,
+    connectTimeoutMs: 6000,
+    graceMs: 2000,
+  })
+  try {
+    const sender = await sup.ensure()
+    assert.ok(sender, '前置条件不成立：helper 未启动（argv 未被记录）')
+    assert.ok(existsSync(out), 'helper 未记录 argv')
+    const argv: string[] = JSON.parse(readFileSync(out, 'utf8'))
+    assert.equal(
+      argv.at(-1),
+      s.sock,
+      `socket 路径不是最后一个参数，插件将永远无法与 helper 通信：${JSON.stringify(argv)}`,
+    )
+  } finally {
+    await sup.dispose()
+    if (prevOut === undefined) delete process.env.ARGV_OUT
+    else process.env.ARGV_OUT = prevOut
+    s.cleanup()
+  }
+})
+
+test('抛异常的日志 sink 不会逃出 "never rejects" 契约', async () => {
+  const s = scratch()
+  const boom = (): never => {
+    throw new Error('log sink exploded')
+  }
+  // 路径 1：spawn 同步抛（NUL 路径），且 onStderr 自身也抛
+  const h1 = await startHelper({
+    helperPath: 'bad\u0000path',
+    socketPath: s.sock,
+    connectTimeoutMs: 500,
+    graceMs: 200,
+    onStderr: boom,
+  })
+  assert.equal(h1.sender, null)
+  await assert.doesNotReject(() => h1.dispose())
+
+  // 路径 2：异步 ENOENT —— 抛异常发生在 ChildProcess 'error' 监听器内部，
+  // 若不包裹会变成 uncaught exception 直接结束进程
+  const h2 = await startHelper({
+    helperPath: join(s.dir, 'definitely-missing-binary'),
+    socketPath: s.sock,
+    connectTimeoutMs: 600,
+    graceMs: 200,
+    onStderr: boom,
+  })
+  assert.equal(h2.sender, null)
+  await assert.doesNotReject(() => h2.dispose())
+
+  // 路径 3：onStdout sink 抛异常
+  const h3 = await startHelper({
+    helperPath: process.execPath,
+    helperArgs: ['-e', 'process.stdout.write("noise"); setTimeout(()=>{},1500)'],
+    socketPath: s.sock,
+    connectTimeoutMs: 600,
+    graceMs: 200,
+    onStdout: boom,
+  })
+  await assert.doesNotReject(() => h3.dispose())
+
   s.cleanup()
 })
