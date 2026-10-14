@@ -1,0 +1,4 @@
+- insert:
+    - id: dynamic-island-progress
+      name: dsh-dynamic-island-progress
+      config: {}
