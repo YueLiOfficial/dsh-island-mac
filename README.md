@@ -33,6 +33,14 @@
 
 ## 安装
 
+### 装给别人用（正常路径）
+
+插件是一个 **dsh bundle**，所以安装走应用内的**插件管理器**（Plugin Manager → 添加插件），
+**不需要手改任何 profile 文件**。那个输入框接受包名、Git 地址、`.tgz` 压缩包，
+或**本地绝对路径**；发布流程见 [scripts/mount-patch.md](scripts/mount-patch.md) 末尾的说明。
+
+### 从本仓库开发
+
 ```sh
 # 1) 安装依赖（npm cache 会重定向到工作区内，因为 ~/.npm 可能不可写）
 bash scripts/install-deps.sh
@@ -40,8 +48,22 @@ bash scripts/install-deps.sh
 # 2) 构建 Swift 辅助进程（需要完整 Xcode，见下）
 bash scripts/build-helper.sh
 
-# 3) 按 scripts/mount-patch.md 手动把插件挂到 profile
+# 3) 在插件管理器里「添加插件」，填入本仓库的绝对路径
+#    例：/Users/youl/Code/dsh_plugins/dsh-dynamic-island
 ```
+
+⚠️ **不要**手工往 `~/.dsh/profiles/desktop/cordis.patch.yml` 里加插件行 —— 那条路
+不可能生效（profile 层的插件行按包名从 profile 的 `node_modules` 解析，而包还没被安装），
+而且 `desktop` profile 由桌面应用独占管理，CLI 会直接拒绝操作它。
+完整解释见 [scripts/mount-patch.md](scripts/mount-patch.md)。
+
+**装完先看这一个文件**，它是排查「插件没反应」最便宜的一步：
+
+```sh
+cat "$HOME/Library/Application Support/dsh-island/plugin-applied.json"
+```
+
+`apply()` 的第一件事就是写它。文件不存在 ⇒ 问题在加载层，不必怀疑 socket / helper / 渲染。
 
 ### 关于 Xcode
 
