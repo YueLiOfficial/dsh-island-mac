@@ -805,7 +805,15 @@ struct ProgressDetail: View {
 - `stop()`：取消所有订阅与 Task，调用 `Task { await notch.hide() }`。**不阻塞**等待动画。
 
 - [ ] **Step 3: 接线 `main.swift`**
-替换 Task 1 的骨架：解析 socket 路径（`argv[1]`，或默认 `~/Library/Application Support/dsh-island/island.sock`），
+替换 Task 1 的骨架：解析 socket 路径（取 **argv 的最后一个参数**，缺省则用
+`~/Library/Application Support/dsh-island/island.sock`）。
+
+**为什么是「最后一个参数」而不是写死 `argv[1]`**：插件侧已改为无条件把 socket 路径**追加**到
+argv 末尾（`src/supervisor.ts`）。`helperPath` 是原生二进制时 argv 为
+`[binary, <socket>]`，而测试用 `node` 当 helper 时是 `[node, <script>, <socket>]`——
+两种形态下 socket 都在末尾，因此读最后一个参数让同一份 helper 代码在两种形态下都正确。
+（这个缺陷由独立验证发现：原先 socket 路径**从未**被传给 helper，非默认
+`Config.socketPath` 会永久无法通信，且每次 send 都重启一次子进程。）
 创建 `ProgressBuffer` 与 `NotchController`，创建并 `start()` `SocketServer`，
 把 `onMessage` 投递到 `@MainActor` 上的 `buffer.apply`，然后 `NSApplication.shared.run()`。
 
