@@ -10,7 +10,8 @@ import Schema from '@deepseek-ai/schemastery'
 import { ProgressMachine, type ProgressSnapshot } from './progress.ts'
 import { reduceSessionEvent } from './events.ts'
 import { encodeMessage, PROTOCOL_VERSION, type OutboundMessage } from './protocol.ts'
-import { startHelper, type HelperHandle } from './helper.ts'
+import { HelperSupervisor } from './supervisor.ts'
+import type { LineSender } from './transport.ts'
 import { createProgressService, buildReportProgressTool, type IslandProgressService } from './tool.ts'
 import { buildProgressInstruction } from './instructions.ts'
 
@@ -80,10 +81,18 @@ export function apply(ctx: Context, config: Config): void {
   const log = ctx.logger(name)
   const machine = new ProgressMachine()
 
-  let handle: HelperHandle | null = null
+  // The supervisor owns the child process, including the restart/teardown
+  // interleaving. Keeping that logic inline is what allowed an in-flight spawn
+  // to escape teardown (a detached orphan that keeps rendering forever).
+  const supervisor = new HelperSupervisor({
+    helperPath,
+    socketPath,
+    connectTimeoutMs,
+    graceMs,
+    onStderr: (line) => log.warn('island helper: %s', line),
+  })
   let disposed = false
   let idleTimer: ReturnType<typeof setTimeout> | null = null
-  let reconnecting: Promise<void> | null = null
 
   const clearIdleTimer = (): void => {
     if (idleTimer !== null) {
@@ -134,12 +143,27 @@ export function apply(ctx: Context, config: Config): void {
   }
 
   const send = (message: OutboundMessage): void => {
-    const sender = handle?.sender ?? null
-    if (sender === null || !sender.alive) {
-      // One reconnect attempt, driven by the write we were about to make. The
-      // progress message is its own heartbeat, so there is no separate timer.
-      void ensureSender().then((next) => {
-        if (next === null) return
+    const sender = supervisor.sender
+    if (sender !== null && sender.alive) {
+      try {
+        sender.send(encodeMessage(message))
+        bumpIdle()
+        return
+      } catch {
+        log.warn('island: send failed')
+      }
+    }
+
+    // One reconnect attempt, driven by the write we were about to make. The
+    // progress message is its own heartbeat, so there is no separate timer.
+    // `.catch` is mandatory: an unhandled rejection here terminates the whole
+    // DSH process, and this runs from an event handler with no caller to catch it.
+    void ensureSender()
+      .then((next) => {
+        if (next === null) {
+          log.warn('island: no helper available; dropped %s', message.type)
+          return
+        }
         try {
           next.send(encodeMessage(message))
           // Reset the idle clock on the reconnect path too, otherwise a task
@@ -150,14 +174,9 @@ export function apply(ctx: Context, config: Config): void {
           log.warn('island: send failed after reconnect')
         }
       })
-      return
-    }
-    try {
-      sender.send(encodeMessage(message))
-      bumpIdle()
-    } catch {
-      log.warn('island: send failed')
-    }
+      .catch((err: unknown) => {
+        log.warn('island: reconnect failed: %s', String(err))
+      })
   }
 
   const bumpIdle = (): void => {
@@ -171,41 +190,31 @@ export function apply(ctx: Context, config: Config): void {
     ;(idleTimer as { unref?: () => void }).unref?.()
   }
 
-  /** Restarts the helper at most once per burst when the connection died. */
-  const ensureSender = async (): Promise<HelperHandle['sender']> => {
+  /**
+   * Returns a live sender, restarting the helper once if needed.
+   *
+   * Delegates to the supervisor, which owns the restart/teardown interleaving
+   * and guarantees that a spawn in flight when the plugin unloads is torn down
+   * rather than orphaned. Never rejects.
+   */
+  const ensureSender = async (): Promise<LineSender | null> => {
     if (disposed) return null
-    if (reconnecting !== null) {
-      await reconnecting
-      return handle?.sender ?? null
-    }
-    reconnecting = (async () => {
-      await handle?.dispose()
-      handle = null
-      if (disposed) return
-      handle = await startHelper({
-        helperPath,
-        socketPath,
-        connectTimeoutMs,
-        graceMs,
-        onStderr: (line) => log.warn('island helper: %s', line),
-      })
-      if (handle.sender !== null) {
-        handle.sender.send(encodeMessage({ type: 'hello', version: PROTOCOL_VERSION }))
-      } else {
-        log.warn(
-          'island: helper not reachable at %s (binary: %s). ' +
-            'Progress will not be displayed. Build it with the Swift layer, or set helperPath.',
-          socketPath,
-          helperPath,
-        )
+    const sender = await supervisor.ensure()
+    if (sender !== null) {
+      try {
+        sender.send(encodeMessage({ type: 'hello', version: PROTOCOL_VERSION }))
+      } catch {
+        /* the next send will reconnect */
       }
-    })()
-    try {
-      await reconnecting
-    } finally {
-      reconnecting = null
+    } else if (!disposed) {
+      log.warn(
+        'island: helper not reachable at %s (binary: %s). ' +
+          'Progress will not be displayed. Build it with the Swift layer, or set helperPath.',
+        socketPath,
+        helperPath,
+      )
     }
-    return handle?.sender ?? null
+    return sender
   }
 
   // --- Registration -------------------------------------------------------
@@ -234,39 +243,19 @@ export function apply(ctx: Context, config: Config): void {
   // disposers run concurrently, so splitting "signal" from "await exit" across
   // two effects would leave orphans.
   ctx.effect(() => {
-    const connection = (async () => {
-      handle = await startHelper({
-        helperPath,
-        socketPath,
-        connectTimeoutMs,
-        graceMs,
-        onStderr: (line) => log.warn('island helper: %s', line),
-      })
-      if (handle.sender !== null) {
-        handle.sender.send(encodeMessage({ type: 'hello', version: PROTOCOL_VERSION }))
-      } else {
-        log.warn(
-          'island: helper not reachable at %s (binary: %s). ' +
-            'Progress will not be displayed. Build it with the Swift layer, or set helperPath.',
-          socketPath,
-          helperPath,
-        )
-      }
-    })()
+    // Kick off the first connect. `ensureSender` is the single entry point for
+    // both startup and reconnect, so there is exactly one place that can spawn.
+    void ensureSender()
 
     return async () => {
       disposed = true
       // 1. Close our own registrations first so late events stay silent.
       clearIdleTimer()
       pending = null
-      try {
-        await connection
-      } catch {
-        /* startup already logged its reason */
-      }
-      // 2. `dispose` signals and then AWAITS quiescence, escalating if needed.
-      await handle?.dispose()
-      handle = null
+      // 2. The supervisor awaits real quiescence: it waits for any spawn still
+      //    in flight, stops the process, and escalates if SIGTERM is ignored.
+      //    A disposer that only signalled would leave orphans.
+      await supervisor.dispose()
     }
   }, `${name}: helper process`)
 }

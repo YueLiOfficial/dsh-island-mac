@@ -11,6 +11,11 @@ export interface HelperOptions {
   /** How long to wait after SIGTERM before escalating to SIGKILL. */
   graceMs: number
   onStderr?: (line: string) => void
+  /**
+   * Optional stdout sink. Omit it and the child's stdout is `'ignore'`, which
+   * is the safe default: an undrained pipe wedges a chatty helper.
+   */
+  onStdout?: (chunk: string) => void
 }
 
 export interface HelperHandle {
@@ -89,13 +94,35 @@ export async function startHelper(opts: HelperOptions): Promise<HelperHandle> {
     // Best effort; a failure here surfaces later as a connect failure.
   }
 
-  const child = spawn(opts.helperPath, opts.helperArgs ?? [], {
-    stdio: ['ignore', 'pipe', 'pipe'],
-    // Own process group on POSIX so teardown can signal the whole tree with
-    // one negative-pid signal.
-    detached: process.platform !== 'win32',
-    env: scrubbedEnv(),
-  })
+  // spawn can throw SYNCHRONOUSLY (e.g. ERR_INVALID_ARG_VALUE for an empty or
+  // NUL-containing path), unlike the async ENOENT case. This function's
+  // contract is "never rejects", so it must be caught here — a rejection would
+  // surface as an unhandled rejection and terminate the user's DSH session.
+  let child: ChildProcess
+  try {
+    child = spawn(opts.helperPath, opts.helperArgs ?? [], {
+      // stdout is 'ignore' on purpose. A helper that writes to stdout (a log
+      // line per frame, say) would otherwise fill the ~64KiB pipe buffer and
+      // block in write(2), freezing progress with no log and no reconnect,
+      // because the socket stays open. Give it an explicit sink if a caller
+      // ever wants the bytes.
+      stdio: ['ignore', opts.onStdout === undefined ? 'ignore' : 'pipe', 'pipe'],
+      // Own process group on POSIX so teardown can signal the whole tree with
+      // one negative-pid signal.
+      detached: process.platform !== 'win32',
+      env: scrubbedEnv(),
+    })
+  } catch (err) {
+    opts.onStderr?.(`helper spawn threw: ${(err as Error).message}`)
+    return {
+      sender: null,
+      async dispose(): Promise<void> {
+        /* nothing was spawned */
+      },
+    }
+  }
+
+  if (child.stdout) child.stdout.on('data', (chunk: string) => opts.onStdout?.(chunk))
 
   let exited = false
   const exitWaiters: Array<() => void> = []
@@ -128,11 +155,20 @@ export async function startHelper(opts: HelperOptions): Promise<HelperHandle> {
   // on a ChildProcess would crash the host process.
   child.on('error', (err: Error) => {
     opts.onStderr?.(`helper spawn failed: ${err.message}`)
+    // 'error' does NOT imply the process is gone (Node also emits it for a
+    // failed kill), so it must not be treated as proof of exit on its own.
+    // It does mean no 'close'/'exit' may ever arrive, so release waiters —
+    // callers separately check `pid` for whether a process ever existed.
     markExited()
   })
+  // Both events: 'close' waits for the stdio pipes to drain, so a grandchild
+  // holding the write end would delay it past the process's real death.
   child.on('close', markExited)
+  child.on('exit', markExited)
 
   if (child.stderr) {
+    // Bounded: a helper that emits a large newline-free line must not be able
+    // to grow this buffer without limit.
     let buffer = ''
     child.stderr.setEncoding('utf8')
     child.stderr.on('data', (chunk: string) => {
@@ -142,6 +178,17 @@ export async function startHelper(opts: HelperOptions): Promise<HelperHandle> {
         const line = buffer.slice(0, newlineAt)
         buffer = buffer.slice(newlineAt + 1)
         if (line.length > 0) opts.onStderr?.(line)
+      }
+      if (buffer.length > 8192) {
+        opts.onStderr?.(`${buffer.slice(0, 8192)}…[truncated]`)
+        buffer = ''
+      }
+    })
+    // Flush a trailing partial line so the last diagnostic is not lost.
+    child.stderr.on('end', () => {
+      if (buffer.length > 0) {
+        opts.onStderr?.(buffer)
+        buffer = ''
       }
     })
   }
@@ -170,30 +217,43 @@ export async function startHelper(opts: HelperOptions): Promise<HelperHandle> {
     opts.onStderr?.(`helper did not accept a connection within ${opts.connectTimeoutMs}ms`)
   }
 
-  let disposed = false
+  let teardown: Promise<void> | null = null
 
   return {
     sender,
     ...(child.pid === undefined ? {} : { pid: child.pid }),
-    async dispose(): Promise<void> {
-      if (disposed) return
-      disposed = true
+    dispose(): Promise<void> {
+      // A plain boolean guard would let a second concurrent caller return
+      // immediately — before quiescence — so the plugin's single disposer could
+      // report completion while the helper is still alive. Every caller awaits
+      // the same teardown instead.
+      if (teardown !== null) return teardown
 
-      // 1. Close our registrations FIRST so late events stay silent.
-      sender?.close()
-      sender = null
+      teardown = (async (): Promise<void> => {
+        // 1. Close our registrations FIRST so late events stay silent.
+        sender?.close()
+        sender = null
 
-      if (exited || child.pid === undefined) return
+        if (exited || child.pid === undefined) return
 
-      // 2. Ask politely, reaching the whole group.
-      signalTree(child, 'SIGTERM')
-      if (await waitForExit(opts.graceMs)) return
+        // 2. Ask politely, reaching the whole group.
+        signalTree(child, 'SIGTERM')
+        if (await waitForExit(opts.graceMs)) return
 
-      // 3. Escalate, then wait again. Returning after the signal alone would
-      //    leave an orphan — teardown must reach quiescence, not just request
-      //    it.
-      signalTree(child, 'SIGKILL')
-      await waitForExit(opts.graceMs)
+        // 3. Escalate, then wait again. Returning after the signal alone would
+        //    leave an orphan — teardown must reach quiescence, not just request
+        //    it.
+        signalTree(child, 'SIGKILL')
+        if (!(await waitForExit(opts.graceMs))) {
+          // Report rather than silently claim success: a process that survives
+          // SIGKILL for a full grace period is a fact the operator needs.
+          opts.onStderr?.(
+            `helper pid ${String(child.pid)} did not exit within ${opts.graceMs}ms after SIGKILL`,
+          )
+        }
+      })()
+
+      return teardown
     },
   }
 }

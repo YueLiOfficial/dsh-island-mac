@@ -66,8 +66,14 @@ test('扫真实进程表确认无遗留 helper（覆盖派生进程，非仅 pid
     // -f 匹配完整命令行；socket 路径含 @ 和 - 不含正则元字符。
     execFileSync('pgrep', ['-f', `fake-helper\\.mjs.*${marker}`], { stdio: 'pipe' })
     leaked = true
-  } catch {
-    leaked = false   // pgrep 无匹配时退出码 1，即「干净」
+  } catch (err) {
+    const status = (err as { status?: number }).status
+    if (status !== 1) {
+      // 只有退出码 1 才表示「无匹配」。退出码 2 是 ERE 编译失败
+      // （例如 TMPDIR 含正则元字符），把它当成「干净」会让本测试永远假通过。
+      throw new Error(`pgrep exited ${String(status)}; cannot conclude "no process"`)
+    }
+    leaked = false
   }
   s.cleanup()
   assert.equal(leaked, false, '进程表中仍有 fake-helper，dispose 未达到完全停稳')

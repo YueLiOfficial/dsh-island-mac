@@ -11,6 +11,10 @@
  * push, and teardown — before the Swift layer is buildable, and it remains
  * useful afterwards as a protocol integration double.
  *
+ * Diagnostics go to STDERR, not stdout: the plugin deliberately spawns the
+ * helper with stdout ignored (an undrained stdout pipe wedges a chatty
+ * helper), so anything written to stdout would be discarded.
+ *
  * Usage: node fake-helper.mjs <socket-path>
  */
 
@@ -68,15 +72,15 @@ function handleConnection(socket) {
       try {
         const msg = JSON.parse(line)
         if (msg && msg.type === 'progress') {
-          process.stdout.write(`progress ${Math.round(msg.percent * 100)}% ${msg.mode}\n`)
+          process.stderr.write(`progress ${Math.round(msg.percent * 100)}% ${msg.mode}\n`)
         } else if (msg && msg.type === 'hello') {
-          process.stdout.write(`hello v${msg.version}\n`)
+          process.stderr.write(`hello v${msg.version}\n`)
         } else if (msg && msg.type === 'done') {
-          process.stdout.write(`done ok=${msg.ok} reason=${msg.reason}\n`)
+          process.stderr.write(`done ok=${msg.ok} reason=${msg.reason}\n`)
         } else if (msg && msg.type === 'bye') {
-          process.stdout.write('bye\n')
+          process.stderr.write('bye\n')
         } else {
-          process.stdout.write(`unknown ${line}\n`)
+          process.stderr.write(`unknown ${line}\n`)
         }
       } catch {
         process.stderr.write(`fake-helper: malformed frame dropped\n`)
@@ -104,7 +108,7 @@ server.listen(socketPath, () => {
   } catch {
     /* best effort */
   }
-  process.stdout.write(`listening ${socketPath}\n`)
+  process.stderr.write(`listening ${socketPath}\n`)
 })
 
 function shutdown() {

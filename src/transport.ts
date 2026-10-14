@@ -40,6 +40,10 @@ export function connectLineSender(socketPath: string, opts: ConnectOptions): Pro
     const timer = setTimeout(() => {
       if (settled) return
       settled = true
+      // Remove the abort hook on every settle path, not just success/abort —
+      // otherwise each timed-out attempt strands a listener on the caller's
+      // signal.
+      opts.signal?.removeEventListener('abort', onAbort)
       // An unhandled 'error' would crash the process, so keep a listener
       // attached even while abandoning this attempt.
       socket.once('error', () => undefined)
