@@ -172,6 +172,10 @@ npm run typecheck # 仅类型检查（noEmit）
 node scripts/fake-helper.mjs /tmp/island-dev.sock
 ```
 
+它的诊断输出走 **stderr**（不是 stdout）：插件 spawn 辅助进程时刻意把 stdout 设为
+`ignore`——未被排空的 stdout 管道会在写满后阻塞辅助进程，导致进度静默冻结。
+所以任何写到 stdout 的内容都会被丢弃。
+
 然后用 `--patch` overlay 把 `config.socketPath` 指到该路径即可端到端联调。
 
 ## 许可证
