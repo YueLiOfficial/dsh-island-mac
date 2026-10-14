@@ -1,7 +1,48 @@
 import SwiftUI
 
+/// Which chrome DynamicNotchKit will draw around the content.
+///
+/// The library picks between its notch view (drawn on black) and its
+/// floating/"notchless" view (a `.popover` material) from the *screen*, at window
+/// construction time. Content cannot read that from the environment — the
+/// library's `EnvironmentValues.notchStyle` is internal — so the controller
+/// publishes it here and updates it whenever the screen set changes.
+///
+/// Without this, a single hardcoded `.white` is invisible for exactly the users
+/// who only ever get the floating panel: a notchless Mac in light mode.
+@MainActor
+public final class NotchAppearance: ObservableObject {
+    /// True when the floating (`NotchlessView`) panel will be used.
+    @Published public var usesFloatingStyle: Bool
+
+    public init(usesFloatingStyle: Bool) {
+        self.usesFloatingStyle = usesFloatingStyle
+    }
+}
+
+/// Foreground colours for the detail panel.
+///
+/// Pure so the legibility rule is assertable without rendering; the library's own
+/// convention is `notchStyle.isNotch ? .white : .primary`.
+enum DetailPalette {
+    static func foreground(usesFloatingStyle: Bool) -> Color {
+        usesFloatingStyle ? .primary : .white
+    }
+
+    static func secondaryForeground(usesFloatingStyle: Bool) -> Color {
+        usesFloatingStyle ? .secondary : .white.opacity(0.6)
+    }
+
+    static func tint(usesFloatingStyle: Bool, failed: Bool) -> Color {
+        if failed { return .orange }
+        return foreground(usesFloatingStyle: usesFloatingStyle)
+    }
+}
+
 /// Resting state: a percentage pill beside the physical notch.
 ///
+/// Only ever rendered by the library's *notch* view (`NotchlessView` draws the
+/// expanded content alone), so its foreground is unconditionally white on black.
 /// The library lays `compactLeading` out to the left of the notch and
 /// `compactTrailing` to its right, separated by a spacer exactly as wide as the
 /// notch. Keeping everything in `compactTrailing` guarantees it is never covered
@@ -38,13 +79,18 @@ struct ProgressPill: View {
 /// Expanded state: progress bar, percentage, and the status line.
 struct ProgressDetail: View {
     @ObservedObject var buffer: ProgressBuffer
+    @ObservedObject var appearance: NotchAppearance
 
     private var isFailed: Bool {
         buffer.phase == .done(ok: false)
     }
 
+    private var usesFloatingStyle: Bool {
+        appearance.usesFloatingStyle
+    }
+
     private var tint: Color {
-        isFailed ? .orange : .white
+        DetailPalette.tint(usesFloatingStyle: usesFloatingStyle, failed: isFailed)
     }
 
     var body: some View {
@@ -65,11 +111,11 @@ struct ProgressDetail: View {
             if let message = buffer.message, !message.isEmpty {
                 Text(message)
                     .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(DetailPalette.secondaryForeground(usesFloatingStyle: usesFloatingStyle))
                     .lineLimit(2)
             }
         }
-        .foregroundStyle(.white)
+        .foregroundStyle(DetailPalette.foreground(usesFloatingStyle: usesFloatingStyle))
         .frame(width: 260)
         .padding(.horizontal, 14)
         .padding(.vertical, 10)

@@ -122,4 +122,37 @@ final class ProgressBufferTests: XCTestCase {
         buffer.apply(.bye)
         XCTAssertEqual(buffer.activityTick, 3, "bye 不算活动")
     }
+
+    /// `retract` is the collapse path, and it runs *before* the ~0.4s hide
+    /// animation. Zeroing the percentage there would make the pill flash "0%" on
+    /// its way out — the last thing the user should see is the completed number.
+    func testRetractHidesWithoutZeroingThePercentage() {
+        let buffer = ProgressBuffer()
+        buffer.apply(.progress(percent: 0.75, mode: .precise, message: "收尾中"))
+        buffer.retract()
+
+        XCTAssertFalse(buffer.isVisible)
+        XCTAssertEqual(buffer.phase, .idle)
+        XCTAssertEqual(buffer.percent, 0.75)
+        XCTAssertEqual(buffer.message, "收尾中")
+    }
+
+    func testRetractDoesNotCountAsActivity() {
+        let buffer = ProgressBuffer()
+        buffer.retract()
+        XCTAssertEqual(buffer.activityTick, 0)
+        buffer.apply(.progress(percent: 0.1, mode: .estimated, message: nil))
+        XCTAssertEqual(buffer.activityTick, 1)
+    }
+
+    /// After a retract, the next turn's first progress is a real false→true
+    /// transition — that is the event the controller re-shows the island on.
+    func testProgressAfterRetractBecomesVisibleAgain() {
+        let buffer = ProgressBuffer()
+        buffer.apply(.progress(percent: 0.9, mode: .precise, message: nil))
+        buffer.retract()
+        buffer.apply(.progress(percent: 0.05, mode: .estimated, message: "新一轮"))
+        XCTAssertTrue(buffer.isVisible)
+        XCTAssertEqual(buffer.phase, .running)
+    }
 }

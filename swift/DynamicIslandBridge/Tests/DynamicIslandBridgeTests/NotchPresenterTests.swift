@@ -85,7 +85,7 @@ final class NotchPresenterTests: XCTestCase {
         var presenter = makePresenter(hasNotch: true)
         _ = presenter.visibilityChanged(to: true)
         _ = presenter.phaseChanged(to: .done(ok: true))
-        XCTAssertEqual(presenter.lingerElapsed(), [.hide, .resetBuffer])
+        XCTAssertEqual(presenter.lingerElapsed(), [.retractBuffer, .hide])
         XCTAssertFalse(presenter.isVisible)
         XCTAssertFalse(presenter.isLingerPending)
     }
@@ -151,7 +151,7 @@ final class NotchPresenterTests: XCTestCase {
     func testIdleElapsedHidesAndResetsWhileRunning() {
         var presenter = makePresenter(hasNotch: true)
         _ = presenter.visibilityChanged(to: true)
-        XCTAssertEqual(presenter.idleElapsed(), [.hide, .resetBuffer])
+        XCTAssertEqual(presenter.idleElapsed(), [.retractBuffer, .hide])
         XCTAssertFalse(presenter.isVisible)
     }
 
@@ -168,5 +168,84 @@ final class NotchPresenterTests: XCTestCase {
         _ = presenter.phaseChanged(to: .done(ok: true))
         XCTAssertEqual(presenter.idleElapsed(), [])
         XCTAssertTrue(presenter.isLingerPending, "linger 仍然有效")
+    }
+
+    // MARK: 收起的顺序
+
+    /// Retract must come **before** hide.
+    ///
+    /// `hide()` awaits a ~0.4s animation, during which the main actor is free to
+    /// process a new turn's `progress`. `ProgressBuffer` keeps `isVisible == true`
+    /// through `done`, so if the retract were queued behind the hide, that new
+    /// turn would produce no visibility transition at all: the island would stay
+    /// hidden until the new turn's *next* progress frame, and nothing would log an
+    /// error. Retracting first clears the buffer's visibility, so the new turn
+    /// does emit a false→true transition and is shown as soon as the hide ends.
+    func testCollapseRetractsTheBufferBeforeHiding() {
+        var presenter = makePresenter(hasNotch: true)
+        _ = presenter.visibilityChanged(to: true)
+        _ = presenter.phaseChanged(to: .done(ok: true))
+        XCTAssertEqual(presenter.lingerElapsed(), [.retractBuffer, .hide])
+        XCTAssertFalse(presenter.isVisible)
+    }
+
+    func testIdleCollapseAlsoRetractsBeforeHiding() {
+        var presenter = makePresenter(hasNotch: true)
+        _ = presenter.visibilityChanged(to: true)
+        XCTAssertEqual(presenter.idleElapsed(), [.retractBuffer, .hide])
+    }
+
+    func testANewTurnAfterACollapseShowsAgain() {
+        var presenter = makePresenter(hasNotch: true)
+        _ = presenter.visibilityChanged(to: true)
+        _ = presenter.phaseChanged(to: .done(ok: true))
+        _ = presenter.lingerElapsed()
+        XCTAssertEqual(
+            presenter.visibilityChanged(to: true),
+            [.compact],
+            "收起之后的新一轮必须能重新出现"
+        )
+    }
+
+    // MARK: 屏幕能力（合盖 / 换显示器）
+
+    /// `hasNotch` must not be sampled once at init. Closing the lid and moving to
+    /// a notchless display would otherwise leave every presentation using
+    /// `compact()`, which on a floating screen *hides* the window — and hover
+    /// cannot rescue it, because the library's `updateHoverState` bails while the
+    /// notch is hidden.
+    func testScreenCapabilityChangeRepresentsAVisibleIsland() {
+        var presenter = NotchPresenter(hasNotch: true)
+        _ = presenter.visibilityChanged(to: true)
+        XCTAssertEqual(
+            presenter.screenCapabilityChanged(to: false),
+            [.expand],
+            "无刘海屏上 compact 等于隐藏窗口"
+        )
+        XCTAssertFalse(presenter.hasNotch)
+    }
+
+    func testScreenCapabilityChangeIsInertWhenNothingIsShown() {
+        var presenter = NotchPresenter(hasNotch: true)
+        XCTAssertEqual(presenter.screenCapabilityChanged(to: false), [])
+        XCTAssertFalse(presenter.hasNotch, "能力值仍然要更新，供下一轮使用")
+    }
+
+    func testScreenCapabilityChangeWithNoActualChangeIsInert() {
+        var presenter = NotchPresenter(hasNotch: true)
+        _ = presenter.visibilityChanged(to: true)
+        XCTAssertEqual(presenter.screenCapabilityChanged(to: true), [])
+    }
+
+    func testScreenCapabilityIsReReadForEachDecision() {
+        var presenter = NotchPresenter(hasNotch: true)
+        _ = presenter.visibilityChanged(to: true)
+        _ = presenter.visibilityChanged(to: false)
+        presenter.hasNotch = false
+        XCTAssertEqual(
+            presenter.visibilityChanged(to: true),
+            [.expand],
+            "缓存住的 hasNotch 会让岛在换屏后再也不出现"
+        )
     }
 }

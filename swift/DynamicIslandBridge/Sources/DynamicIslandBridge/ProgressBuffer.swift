@@ -78,4 +78,20 @@ public final class ProgressBuffer: ObservableObject {
             self.message = nil
         }
     }
+
+    /// Stop showing the island, keeping the last reading.
+    ///
+    /// This is the *local* collapse (linger and idle timeouts), and it is
+    /// deliberately not `apply(.bye)`. It runs before `hide()` awaits its ~0.4s
+    /// animation, so clearing the percentage here would make the pill flash "0%"
+    /// on its way out. It also makes the next turn's first `progress` a genuine
+    /// false→true visibility transition, which is the event that re-shows the
+    /// island — `apply(.bye)` would be equivalent, but only at the cost of that
+    /// flash.
+    ///
+    /// Not counted as activity: a collapse must not keep the idle watchdog alive.
+    public func retract() {
+        isVisible = false
+        phase = .idle
+    }
 }

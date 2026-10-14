@@ -35,6 +35,7 @@ const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const HELPER = process.argv[2] ?? join(ROOT, 'bin', 'DynamicIslandBridge')
 
 let failures = 0
+let skipped = 0
 const ok = (m) => console.log(`  ✔ ${m}`)
 const bad = (m) => { failures++; console.log(`  ✖ ${m}`) }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -80,7 +81,12 @@ function windowCount() {
 /** 与窗口数联动：探针不可用时跳过（记一条说明，不算通过）。 */
 let windowChecksUsable = probeReady
 function expectWindow(expected, label) {
-  if (!windowChecksUsable) { console.log(`  ·  ${label}：跳过（无窗口探针）`); return }
+  if (!windowChecksUsable) {
+    // 明确计为「跳过」而不是通过：跳过不等于验证过。
+    skipped++
+    console.log(`  ·  ${label}：跳过（无窗口探针）`)
+    return
+  }
   const count = windowCount()
   if (count === expected) ok(`${label}：窗口数 = ${count}`)
   else bad(`${label}：窗口数 = ${count}，期望 ${expected}`)
@@ -172,9 +178,14 @@ if (!sessionEvent) {
     if (windowCount() > 0) { appeared = true; break }
     await sleep(200)
   }
-  if (!windowChecksUsable) console.log('  ·  turn/start 后窗口出现：跳过（无窗口探针）')
-  else if (appeared) ok('turn/start 后窗口出现——事件→状态机→socket→helper→窗口全链路通')
-  else bad('turn/start 后 6s 内没有出现窗口')
+  if (!windowChecksUsable) {
+    skipped++
+    console.log('  ·  turn/start 后窗口出现：跳过（无窗口探针）')
+  } else if (appeared) {
+    ok('turn/start 后窗口出现——事件→状态机→socket→helper→窗口全链路通')
+  } else {
+    bad('turn/start 后 6s 内没有出现窗口')
+  }
 }
 
 // ---- 3. 卸载：必须优雅退出，且不是超时升级 ----
@@ -209,14 +220,69 @@ if (pid) {
 
 expectWindow(0, 'dispose 之后')
 
-// ---- 4. 空闲超时：插件意外消失时，岛不能永远留在最后一次进度上 ----
+// ---- 4. 收起动画期间来新一轮：岛必须重新出现 ----
+//
+// `retract` 排在 `hide` 之前是这条检查的全部意义。`hide()` 会 await 约 0.4s 动画，
+// 如果复位排在它之后，这段时间里到达的新 turn 的 progress 落在一个「缓冲区仍然可见」的
+// 状态上，不产生任何可见性跃迁，岛就会一直隐藏到新 turn 的下一个 progress 帧——
+// 没有任何日志、没有报错。旧顺序在同样的脚本下会稳定报 MATCHED=0（已用变异体实测）。
+//
+// 时序：linger 是 1.2s，hide 动画约 0.4s，所以在 done 之后 1.35s 发送正好落在动画中。
+// 若机器较慢导致发送早于 linger，新 turn 会取消 linger、岛根本不隐藏——检查仍然通过，
+// 只是不再具备区分力（不会出现假失败）。
+async function phaseNewTurnDuringHide() {
+  if (!windowChecksUsable) {
+    skipped++
+    console.log('\n== 收起动画期间来新一轮：跳过（无窗口探针）——跳过不算通过 ==')
+    return
+  }
+
+  console.log('\n== 收起动画期间来新一轮 ==')
+  const raceSocket = join(dir, 'race.sock')
+  const child = spawn(HELPER, [raceSocket], { stdio: ['ignore', 'ignore', 'pipe'], detached: true })
+  child.stderr.on('data', () => {})
+
+  const send = (line) => new Promise((resolve, reject) => {
+    const socket = createConnection(raceSocket, () => {
+      socket.write(line)
+      socket.end()
+      resolve()
+    })
+    socket.on('error', reject)
+  })
+
+  try {
+    const until = Date.now() + 8_000
+    while (Date.now() < until && !existsSync(raceSocket)) await sleep(100)
+    if (!existsSync(raceSocket)) { bad('socket 出现：8000ms 内未满足'); return }
+
+    await send('{"type":"progress","percent":0.5,"mode":"estimated"}\n')
+    await sleep(600)
+    if (windowCount() === 0) { bad('progress 后窗口未出现，无法继续竞态检查'); return }
+
+    await send('{"type":"done","reason":"completed","ok":true}\n')
+    await sleep(1_350) // linger(1.2s) 已过，hide 动画(~0.4s)进行中
+    await send('{"type":"progress","percent":0.1,"mode":"estimated","message":"新一轮"}\n')
+    await sleep(1_500)
+
+    if (windowCount() > 0) ok('隐藏动画期间到达的新一轮没有被抹掉，岛重新出现')
+    else bad('新一轮被上一轮的复位抹掉了：岛保持隐藏（retract 必须排在 hide 之前）')
+  } finally {
+    try { process.kill(-child.pid, 'SIGKILL') } catch { /* already gone */ }
+    await sleep(200)
+    rmSync(raceSocket, { force: true })
+  }
+}
+
+// ---- 5. 空闲超时：插件意外消失时，岛不能永远留在最后一次进度上 ----
 //
 // helper 自己的空闲超时只有在插件不发消息时才生效，而插件默认 120s——
 // 太慢，测不了。所以这里单独拉起一个把 --idle-timeout-ms 调到 3s 的实例，
 // 从 Node 直接写 NDJSON，验证「出现过 → 静默后自动收起」。
 async function phaseIdleTimeout() {
   if (!windowChecksUsable) {
-    console.log('\n== 空闲超时：跳过（无窗口探针）==')
+    skipped++
+    console.log('\n== 空闲超时：跳过（无窗口探针）——跳过不算通过 ==')
     return
   }
 
@@ -266,9 +332,20 @@ async function phaseIdleTimeout() {
 }
 
 await phaseIdleTimeout()
+await phaseNewTurnDuringHide()
 
 rmSync(dir, { recursive: true, force: true })
 
 console.log('')
-if (failures === 0) console.log('结论：真插件源码驱动真 helper，渲染与清理都正确，无孤儿。')
-else { console.log(`结论：${failures} 项失败。`); process.exitCode = 1 }
+if (failures > 0) {
+  console.log(`结论：${failures} 项失败，${skipped} 项跳过。`)
+  process.exitCode = 1
+} else if (skipped > 0) {
+  // 没有失败的检查不代表验证过：窗口相关的断言全部被跳过时，
+  // 「渲染正确」这句话是没有依据的。
+  console.log(`结论：无失败，但有 ${skipped} 项检查被跳过（没有窗口探针时无法验证渲染）。`)
+  console.log('      跳过不等于通过——这里不报成功。')
+  process.exitCode = 1
+} else {
+  console.log('结论：真插件源码驱动真 helper，渲染与清理都正确，无孤儿。')
+}

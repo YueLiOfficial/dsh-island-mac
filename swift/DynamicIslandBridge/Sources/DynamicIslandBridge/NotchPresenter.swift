@@ -16,8 +16,13 @@ public enum NotchEffect: Equatable, Sendable {
     /// linger window: without it the previous turn's queued `hide()` lands right
     /// after the new pill appears, and the island flashes and vanishes.
     case cancelLingerHide
-    /// Feed `bye` back into the buffer so the next turn starts from a clean state.
-    case resetBuffer
+    /// Stop showing the current reading.
+    ///
+    /// Runs **before** `hide` on every collapse path. `hide()` awaits a ~0.4s
+    /// animation during which a new turn's `progress` can arrive; retracting
+    /// first is what makes that new turn produce a real false→true visibility
+    /// transition, so it is shown instead of being swallowed.
+    case retractBuffer
 }
 
 /// Pure decision layer for notch presentation.
@@ -35,7 +40,11 @@ public enum NotchEffect: Equatable, Sendable {
 public struct NotchPresenter {
     /// Whether the target screen has a physical notch. On such a screen the
     /// library supports the compact pill; without one it does not.
-    public let hasNotch: Bool
+    /// Re-read from the current screen before each decision, never cached for the
+    /// session: closing the lid and moving to a notchless display would otherwise
+    /// leave every presentation asking for `compact()`, which on a floating screen
+    /// *hides* the window and cannot be rescued by hover.
+    public var hasNotch: Bool
 
     public private(set) var isVisible: Bool
     public private(set) var isHovering: Bool
@@ -116,7 +125,7 @@ public struct NotchPresenter {
         isLingerPending = false
         isVisible = false
         isHovering = false
-        return [.hide, .resetBuffer]
+        return [.retractBuffer, .hide]
     }
 
     /// The idle watchdog fired: nothing has arrived for a long time.
@@ -130,6 +139,20 @@ public struct NotchPresenter {
         guard isVisible, !isLingerPending else { return [] }
         isVisible = false
         isHovering = false
-        return [.hide, .resetBuffer]
+        return [.retractBuffer, .hide]
+    }
+
+    /// The set of available screens changed (lid closed, display attached or
+    /// removed).
+    ///
+    /// Returns the effects needed to keep the current presentation valid on the
+    /// new screen. A floating screen cannot be compacted — the library's
+    /// `_compact()` calls `hide()` instead — so a visible island must be
+    /// re-expressed as expanded.
+    public mutating func screenCapabilityChanged(to hasNotch: Bool) -> [NotchEffect] {
+        let changed = hasNotch != self.hasNotch
+        self.hasNotch = hasNotch
+        guard changed, isVisible else { return [] }
+        return [hasNotch ? .compact : .expand]
     }
 }

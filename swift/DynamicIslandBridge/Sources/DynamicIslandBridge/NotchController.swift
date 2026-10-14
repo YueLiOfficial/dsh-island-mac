@@ -32,6 +32,7 @@ public final class NotchController {
     public static let hoverDebounceMilliseconds: UInt64 = 200
 
     private let buffer: ProgressBuffer
+    private let appearance: NotchAppearance
     private let lingerNanoseconds: UInt64
     private let idleNanoseconds: UInt64
 
@@ -53,7 +54,9 @@ public final class NotchController {
         self.buffer = buffer
         self.lingerNanoseconds = lingerMilliseconds * 1_000_000
         self.idleNanoseconds = idleTimeoutMilliseconds * 1_000_000
-        self.presenter = NotchPresenter(hasNotch: Self.screenHasNotch())
+        let hasNotch = Self.screenHasNotch()
+        self.presenter = NotchPresenter(hasNotch: hasNotch)
+        self.appearance = NotchAppearance(usesFloatingStyle: !hasNotch)
     }
 
     /// Whether the primary screen has a physical notch.
@@ -75,12 +78,13 @@ public final class NotchController {
         // Captured as locals: `DynamicNotch.init` is not main-actor isolated, so
         // the view-builder closures must not reach back into `self`.
         let buffer = self.buffer
+        let appearance = self.appearance
 
         let notch = DynamicNotch<ProgressDetail, EmptyView, ProgressPill>(
             // Not `.keepVisible` and not `.all` — see the type doc.
             hoverBehavior: [.increaseShadow],
             style: .auto,
-            expanded: { ProgressDetail(buffer: buffer) },
+            expanded: { ProgressDetail(buffer: buffer, appearance: appearance) },
             compactLeading: { EmptyView() },
             compactTrailing: { ProgressPill(buffer: buffer) }
         )
@@ -131,6 +135,19 @@ public final class NotchController {
                 MainActor.assumeIsolated { self?.restartIdleTimer() }
             }
             .store(in: &observationCancellables)
+
+        // Attaching or removing a display changes whether the library can render
+        // the compact pill at all — on a floating screen `compact()` hides the
+        // window, and hover cannot rescue it because the library's hover handler
+        // bails while the notch is hidden. Re-evaluate instead of trusting the
+        // capability sampled at startup.
+        NotificationCenter.default.publisher(
+            for: NSApplication.didChangeScreenParametersNotification
+        )
+        .sink { [weak self] _ in
+            MainActor.assumeIsolated { self?.handleScreenParametersChanged() }
+        }
+        .store(in: &observationCancellables)
     }
 
     /// Cancels every subscription and timer and asks the window to hide.
@@ -159,7 +176,23 @@ public final class NotchController {
     // MARK: - Input handling
 
     private func handleVisibility(_ visible: Bool) {
+        refreshScreenCapability()
         enqueue(presenter.visibilityChanged(to: visible))
+    }
+
+    /// Re-reads the screen capability and re-presents if it changed.
+    ///
+    /// Polling the value before every decision is cheaper than trusting a
+    /// notification that may not fire for the transition that matters.
+    private func refreshScreenCapability() {
+        presenter.hasNotch = Self.screenHasNotch()
+        appearance.usesFloatingStyle = !presenter.hasNotch
+    }
+
+    private func handleScreenParametersChanged() {
+        let hasNotch = Self.screenHasNotch()
+        appearance.usesFloatingStyle = !hasNotch
+        enqueue(presenter.screenCapabilityChanged(to: hasNotch))
     }
 
     private func handlePhase(_ phase: ProgressBuffer.Phase) {
@@ -208,8 +241,11 @@ public final class NotchController {
             lingerTask?.cancel()
             lingerTask = nil
 
-        case .resetBuffer:
-            buffer.apply(.bye)
+        case .retractBuffer:
+            // Before `.hide`, never after: `hide()` awaits ~0.4s during which a new
+            // turn's progress can land, and clearing visibility first is what lets
+            // that new turn re-show the island instead of being swallowed.
+            buffer.retract()
         }
     }
 
