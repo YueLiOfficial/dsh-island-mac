@@ -1173,7 +1173,7 @@ Expected: FAIL —— `Cannot find module '../src/helper.ts'`（`scripts/fake-he
 - [ ] **Step 7: 运行测试确认通过**
 
 Run: `node --test test/helper.test.ts`
-Expected: 6 passed
+Expected: 6 passed（执行时另有独立生命周期复审，追加了 test/lifecycle.test.ts 的 10 个更强测试，见文件末尾「执行结果」）
 
 - [ ] **Step 8: 只跑 helper 测试并检查孤儿进程（本任务的关键验收，独立成步）**
 
@@ -1426,6 +1426,30 @@ xcrun swiftc -parse-as-library -c /tmp/t.swift -o /tmp/t.o && echo MACROS_OK
 ```
 
 阶段二会有一份独立计划，因为它的风险面（SwiftUI 宏、SwiftPM 沙箱、SDK 版本）与阶段一完全不同，且需要用真实 Xcode 重新验证本计划已实测的三个工具链坑。
+
+---
+
+## 执行结果（实现完成后回填）
+
+Task 1–9 已全部执行。与计划的偏差与追加：
+
+- 测试总数 **63**（计划预估 57）；新增 `test/lifecycle.test.ts` 共 10 个测试。
+- **Task 7 完成后按要求做了独立进程生命周期复审**（全新上下文 subagent + 可复现 harness），
+  发现 **1 Critical / 4 Important / 2 Minor**，全部修复并配回归测试：
+  - **Critical**：`ensureSender` 中 `handle = await startHelper(...)` 的赋值窗口
+    （最长 10s）——此窗口内卸载会让 disposer 对 null 无操作，留下 detached 孤儿。
+    修复方式：抽出 `src/supervisor.ts`（`HelperSupervisor`），用 spawn token 保证
+    "未被采纳的 handle 也会被 teardown"，并让 `dispose()` 等待在途 spawn。
+  - **Important**：并发 `dispose()` 第二次立即返回（bool 守卫）→ 改为收敛到同一个 teardown promise；
+    stdout 被 pipe 但从不排空 → 改为默认 `ignore`（否则 helper 写满管道后阻塞，进度静默冻结）；
+    最后一次 `waitForExit` 返回值被丢弃 → 改为检查并上报。
+  - **Minor**：`spawn` 同步抛违反 "never rejects" 契约（未处理 rejection 会杀掉会话）→ 已 try/catch + `.catch`；
+    连接超时路径泄漏 abort 监听 → 已修；stderr 缓冲无界 → 已加界并 flush 尾行。
+- **原有两个孤儿测试是同义反复**：假 helper 在 SIGTERM 后约 2ms 退出、测试又 sleep 300ms，
+  因此"只发信号就返回"的实现照样通过（复审用删除 `await waitForExit` 的 mutant 证明）。
+  已替换为"helper 忽略 SIGTERM 700–800ms + 在每个 dispose() 返回的那一刻判定存活 + 不 sleep"。
+- Task 8 的测试拿到的是**假 RED 降级**（`src/instructions.ts` 在 Task 7 已抽出），
+  其中 1 个测试先失败后通过，另 8 个为事后测试——不构成 RED→GREEN 证据，已在 ledger 如实记录。
 
 ---
 

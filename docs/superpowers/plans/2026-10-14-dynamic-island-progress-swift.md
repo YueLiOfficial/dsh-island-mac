@@ -907,7 +907,7 @@ npm test && npm run typecheck
 swift test --disable-sandbox --package-path swift/DynamicIslandBridge
 ```
 
-Expected: TS 侧 57/57 + typecheck 干净；Swift 侧 32/32。
+Expected: TS 侧 63/63 + typecheck 干净；Swift 侧 32/32。
 
 - [ ] **Step 6: Commit**
 
