@@ -1,0 +1,10 @@
+node_modules/
+.npm-cache/
+.pnpm-store/
+.pnpm-home/
+.swift-cache/
+.build/
+bin/
+swift/*/.build/
+.DS_Store
+.superpowers/
