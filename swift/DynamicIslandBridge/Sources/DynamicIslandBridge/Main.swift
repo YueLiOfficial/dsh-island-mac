@@ -12,6 +12,14 @@ func islandLog(_ text: String) {
     FileHandle.standardError.write(Data("island: \(text)\n".utf8))
 }
 
+/// Retained for the lifetime of the process.
+///
+/// This must be a stored global, not a discarded return value: a `DispatchSource`
+/// that loses its last reference is cancelled, which would leave SIGTERM ignored
+/// (the disposition was replaced with `SIG_IGN`) and the process unkillable except
+/// by SIGKILL. That failure mode is exactly what the end-to-end check caught.
+@MainActor private var signalSources: [DispatchSourceSignal] = []
+
 /// Entry point.
 ///
 /// This process is a background accessory: no Dock icon, no menu bar item, no
@@ -32,21 +40,24 @@ enum DynamicIslandBridgeMain {
             exit(0)
         }
 
-        let socketPath = resolveSocketPath(CommandLine.arguments)
+        let options = BridgeOptions.parse(CommandLine.arguments)
 
         do {
-            try ensureParentDirectory(of: socketPath)
+            try ensureParentDirectory(of: options.socketPath)
         } catch {
-            islandLog("cannot prepare the socket directory for \(socketPath): \(error)")
+            islandLog("cannot prepare the socket directory for \(options.socketPath): \(error)")
             exit(1)
         }
 
         let buffer = ProgressBuffer()
-        let controller = NotchController(buffer: buffer)
+        let controller = NotchController(
+            buffer: buffer,
+            idleTimeoutMilliseconds: options.idleTimeoutMilliseconds
+        )
         controller.start()
 
         let server = SocketServer(
-            socketPath: socketPath,
+            socketPath: options.socketPath,
             onMessage: { message in
                 // Delivered on the server's own serial queue.
                 Task { @MainActor in buffer.apply(message) }
@@ -57,37 +68,60 @@ enum DynamicIslandBridgeMain {
         do {
             try server.start()
         } catch {
-            islandLog("cannot listen on \(socketPath): \(error)")
+            islandLog("cannot listen on \(options.socketPath): \(error)")
             exit(1)
         }
 
-        islandLog("listening on \(socketPath)")
+        signalSources = installSignalHandlers(server: server, controller: controller)
+
+        // The pid is included so an end-to-end check can verify *this* process
+        // exited, without resorting to `pgrep -f`, which also matches the shell
+        // that invoked it.
+        islandLog("listening on \(options.socketPath) (pid \(getpid()))")
         NSApplication.shared.run()
     }
 }
 
-/// Where to listen.
+/// Handles SIGTERM/SIGINT by shutting down and exiting promptly.
 ///
-/// The plugin always appends the socket path as the **last** argument
-/// (`src/supervisor.ts`). Reading the last element rather than `argv[1]` keeps
-/// this correct for both the native binary (`[binary, socket]`) and a
-/// `node script.mjs` stand-in used during development
-/// (`[node, script, socket]`).
-func resolveSocketPath(_ arguments: [String]) -> String {
-    if let last = arguments.dropFirst().last, !last.hasPrefix("-") {
-        return last
-    }
-    return defaultSocketPath()
-}
+/// The plugin's disposer sends SIGTERM and waits `graceMs` (3s) before escalating
+/// to SIGKILL, so anything slow here shows up as an ungraceful kill.
+///
+/// Dispatch sources rather than a C signal handler: a signal handler may only
+/// call async-signal-safe functions, and neither `Task { }` nor Swift runtime
+/// work qualifies. A `DispatchSourceSignal` handler runs in normal context.
+///
+/// **The caller must retain the returned sources.** A released dispatch source is
+/// cancelled, and since the default disposition has been replaced with `SIG_IGN`
+/// the signal would then be ignored entirely.
+@MainActor
+private func installSignalHandlers(
+    server: SocketServer,
+    controller: NotchController
+) -> [DispatchSourceSignal] {
+    // Default disposition would kill the process before the dispatch source ever
+    // runs, leaving the socket file behind.
+    signal(SIGTERM, SIG_IGN)
+    signal(SIGINT, SIG_IGN)
 
-/// Mirrors `defaultSocketPath()` in `src/index.ts`.
-func defaultSocketPath() -> String {
-    FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library", isDirectory: true)
-        .appendingPathComponent("Application Support", isDirectory: true)
-        .appendingPathComponent("dsh-island", isDirectory: true)
-        .appendingPathComponent("island.sock")
-        .path
+    var sources: [DispatchSourceSignal] = []
+    for signalNumber in [SIGTERM, SIGINT] {
+        let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: .main)
+        source.setEventHandler {
+            // The main dispatch queue is the main actor's executor.
+            MainActor.assumeIsolated {
+                controller.stop()
+                // Also unlinks the socket, so the next start does not need the
+                // stale-socket recovery path.
+                server.stop()
+                islandLog("stopped on signal \(signalNumber)")
+                exit(0)
+            }
+        }
+        source.resume()
+        sources.append(source)
+    }
+    return sources
 }
 
 /// The socket lives in a directory only this user can enter: the path is

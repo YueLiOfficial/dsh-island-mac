@@ -145,4 +145,28 @@ final class NotchPresenterTests: XCTestCase {
         // already on a pill that has not been drawn yet.
         XCTAssertFalse(presenter.isHovering)
     }
+
+    // MARK: 空闲超时
+
+    func testIdleElapsedHidesAndResetsWhileRunning() {
+        var presenter = makePresenter(hasNotch: true)
+        _ = presenter.visibilityChanged(to: true)
+        XCTAssertEqual(presenter.idleElapsed(), [.hide, .resetBuffer])
+        XCTAssertFalse(presenter.isVisible)
+    }
+
+    func testIdleElapsedIsNoOpWhenNothingIsShowing() {
+        var presenter = makePresenter(hasNotch: true)
+        XCTAssertEqual(presenter.idleElapsed(), [])
+    }
+
+    /// The linger timer already owns the hide. A second `hide()` racing it would
+    /// ask the library to do the same thing twice.
+    func testIdleElapsedDefersToAPendingLingerHide() {
+        var presenter = makePresenter(hasNotch: true)
+        _ = presenter.visibilityChanged(to: true)
+        _ = presenter.phaseChanged(to: .done(ok: true))
+        XCTAssertEqual(presenter.idleElapsed(), [])
+        XCTAssertTrue(presenter.isLingerPending, "linger 仍然有效")
+    }
 }

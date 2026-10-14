@@ -32,6 +32,14 @@ public final class ProgressBuffer: ObservableObject {
     @Published public private(set) var isVisible = false
     @Published public private(set) var phase: Phase = .idle
 
+    /// Bumped on every message that means "work is happening" (`progress`,
+    /// `done`). The idle watchdog restarts on each tick. `hello` and `bye` do not
+    /// count: they would keep an invisible island's timer alive forever.
+    ///
+    /// A counter rather than a `PassthroughSubject` because a `@MainActor` class
+    /// is `Sendable` and therefore may not store a non-`Sendable` subject.
+    @Published public private(set) var activityTick: UInt64 = 0
+
     public init() {}
 
     public func apply(_ message: InboundMessage) {
@@ -49,6 +57,7 @@ public final class ProgressBuffer: ObservableObject {
             if let message { self.message = message }
             self.isVisible = true
             self.phase = .running
+            self.activityTick &+= 1
 
         case let .done(reason, ok):
             self.phase = .done(ok: ok)
@@ -58,6 +67,7 @@ public final class ProgressBuffer: ObservableObject {
             // The reason is more useful than the stale status line: it is the
             // only place the failure cause reaches the user.
             self.message = reason
+            self.activityTick &+= 1
             // `isVisible` stays true. The linger-then-hide timing belongs to
             // NotchController, which owns the animation.
 

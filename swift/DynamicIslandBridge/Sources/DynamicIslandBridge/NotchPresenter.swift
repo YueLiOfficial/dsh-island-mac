@@ -118,4 +118,18 @@ public struct NotchPresenter {
         isHovering = false
         return [.hide, .resetBuffer]
     }
+
+    /// The idle watchdog fired: nothing has arrived for a long time.
+    ///
+    /// Covers the case where the plugin dies without a `bye` — a half-open socket
+    /// never produces EOF, so without this the island would sit at the last
+    /// percentage forever.
+    public mutating func idleElapsed() -> [NotchEffect] {
+        // A pending linger already owns the hide; a second `hide()` racing it
+        // asks the library to do the same thing twice.
+        guard isVisible, !isLingerPending else { return [] }
+        isVisible = false
+        isHovering = false
+        return [.hide, .resetBuffer]
+    }
 }

@@ -138,25 +138,35 @@ NDJSON：每行一个 JSON 对象，UTF-8。插件 → 辅助进程方向：
 | 1 | `npm test` | 全部测试通过 |
 | 2 | `npm run typecheck` | `tsc` 退出码 0 |
 | 3 | 构建辅助进程 | 产出可执行文件 |
-| 4 | 手工运行辅助进程 | `lsof -U \| grep island.sock` 显示监听 |
-| 5 | 推一条消息 | 见下 |
-| 6 | `dsh --profile desktop --dump-config \| grep -i dynamic-island` | 出现该层 |
-| 7 | 检查 fiber 状态 | **不是 `PENDING`**（inject 服务缺失会静默 PENDING） |
-| 8 | 跑一个真实任务 | 岛在 turn 开始出现、step 递增、结束收起 |
-| 9 | **卸载插件** | `pgrep -f DynamicIslandBridge` 无输出 |
+| 4 | `swift test --disable-sandbox --package-path swift/DynamicIslandBridge` | Swift 侧 80 条全绿 |
+| 5 | `node scripts/e2e-real-helper.mjs` | 真插件源码驱动真二进制：窗口出现、优雅退出、无孤儿、空闲超时生效 |
+| 6 | 手工运行辅助进程 | `lsof -U \| grep island.sock` 显示监听 |
+| 7 | 推一条消息 | 见下 |
+| 8 | `dsh --profile desktop --dump-config \| grep -i dynamic-island` | 出现该层 |
+| 9 | 检查 fiber 状态 | **不是 `PENDING`**（inject 服务缺失会静默 PENDING） |
+| 10 | 跑一个真实任务 | 岛在 turn 开始出现、step 递增、结束收起 |
+| 11 | **卸载插件** | `pgrep -f DynamicIslandBridge` 无输出 |
 
-第 5 步：
+第 7 步：
 
 ```sh
 echo '{"type":"progress","percent":0.42,"mode":"precise"}' | nc -U \
   "$HOME/Library/Application Support/dsh-island/island.sock"
 ```
 
-第 9 步是唯一能证明清理逻辑正确的测试：
+第 11 步是唯一能证明清理逻辑正确的测试：
 
 ```sh
 bash scripts/verify-teardown.sh
 ```
+
+⚠️ **不要**用 `bash scripts/verify-teardown.sh DynamicIslandBridge` 当作第 11 步。那条命令跑的是
+**假 helper**（Node 写的 `fake-helper.mjs`），断言 `pgrep` 找不到真二进制属于同义反复；
+更糟的是 `pgrep -f` 会匹配到调用它的那个 shell 自己（命令行里就含这个字符串），
+结论随调用方式而变。真正的第 11 步是第 5 步的 `scripts/e2e-real-helper.mjs`：
+它从 helper 自己打印的启动行里解析 pid，用 `kill(pid, 0)` 判定存活，
+并断言 socket 文件**已被删除**——SIGKILL 路径不可能删除它，所以这一条恰好把
+「优雅 SIGTERM」与「超时升级为 SIGKILL」区分开。
 
 ## 开发
 

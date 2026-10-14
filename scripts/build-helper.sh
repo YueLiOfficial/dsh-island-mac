@@ -49,10 +49,19 @@ export CLANG_MODULE_CACHE_PATH="$PWD/.swift-cache"
 export SWIFT_MODULECACHE_PATH="$PWD/.swift-cache"
 mkdir -p "$CLANG_MODULE_CACHE_PATH"
 
-echo "==> swift build -c release"
-swift build -c release --disable-sandbox --package-path "$PACKAGE"
+# SwiftPM's own caches live under $HOME, which a DSH agent sandbox cannot write:
+# it then prints three "not accessible or not writable" warnings on every
+# invocation. Point them into the repository so build output stays clean.
+SWIFTPM_CACHE_ARGS=(
+  --cache-path "$PWD/.swift-cache/shared"
+  --config-path "$PWD/.swift-cache/config"
+  --security-path "$PWD/.swift-cache/security"
+)
 
-BUILT="$(swift build -c release --disable-sandbox --package-path "$PACKAGE" --show-bin-path)/DynamicIslandBridge"
+echo "==> swift build -c release"
+swift build -c release --disable-sandbox --package-path "$PACKAGE" "${SWIFTPM_CACHE_ARGS[@]}"
+
+BUILT="$(swift build -c release --disable-sandbox --package-path "$PACKAGE" "${SWIFTPM_CACHE_ARGS[@]}" --show-bin-path)/DynamicIslandBridge"
 if [ ! -x "$BUILT" ]; then
   echo "✖ 构建完成但未找到可执行文件：$BUILT" >&2
   exit 1

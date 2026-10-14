@@ -33,6 +33,7 @@ public final class NotchController {
 
     private let buffer: ProgressBuffer
     private let lingerNanoseconds: UInt64
+    private let idleNanoseconds: UInt64
 
     private var presenter: NotchPresenter
     private var notch: DynamicNotch<ProgressDetail, EmptyView, ProgressPill>?
@@ -42,13 +43,16 @@ public final class NotchController {
     private var effectTask: Task<Void, Never>?
     private var lingerTask: Task<Void, Never>?
     private var hoverDebounceTask: Task<Void, Never>?
+    private var idleTask: Task<Void, Never>?
 
     public init(
         buffer: ProgressBuffer,
-        lingerMilliseconds: UInt64 = NotchController.defaultLingerMilliseconds
+        lingerMilliseconds: UInt64 = NotchController.defaultLingerMilliseconds,
+        idleTimeoutMilliseconds: UInt64 = BridgeOptions.defaultIdleTimeoutMilliseconds
     ) {
         self.buffer = buffer
         self.lingerNanoseconds = lingerMilliseconds * 1_000_000
+        self.idleNanoseconds = idleTimeoutMilliseconds * 1_000_000
         self.presenter = NotchPresenter(hasNotch: Self.screenHasNotch())
     }
 
@@ -116,6 +120,17 @@ public final class NotchController {
                 MainActor.assumeIsolated { self?.handleHover(hovering) }
             }
             .store(in: &observationCancellables)
+
+        // Restart the idle watchdog on every message that means work is
+        // happening. `dropFirst` skips the subscription replay of the current
+        // value, so a fresh controller does not arm a timer before anything has
+        // been shown.
+        buffer.$activityTick
+            .dropFirst()
+            .sink { [weak self] _ in
+                MainActor.assumeIsolated { self?.restartIdleTimer() }
+            }
+            .store(in: &observationCancellables)
     }
 
     /// Cancels every subscription and timer and asks the window to hide.
@@ -127,6 +142,8 @@ public final class NotchController {
         hoverDebounceTask = nil
         lingerTask?.cancel()
         lingerTask = nil
+        idleTask?.cancel()
+        idleTask = nil
 
         effectContinuation?.finish()
         effectContinuation = nil
@@ -204,6 +221,20 @@ public final class NotchController {
             // `try?` swallows CancellationError, so check explicitly.
             guard !Task.isCancelled else { return }
             self.enqueue(self.presenter.lingerElapsed())
+        }
+    }
+
+    /// Arms the "nothing has arrived for a long time" watchdog.
+    ///
+    /// Covers the plugin dying without a `bye`: a half-open socket never produces
+    /// EOF, so the island would otherwise sit at the last percentage forever.
+    private func restartIdleTimer() {
+        idleTask?.cancel()
+        idleTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(nanoseconds: self.idleNanoseconds)
+            guard !Task.isCancelled else { return }
+            self.enqueue(self.presenter.idleElapsed())
         }
     }
 }

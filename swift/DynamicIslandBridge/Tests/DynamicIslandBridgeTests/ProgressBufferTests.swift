@@ -99,4 +99,27 @@ final class ProgressBufferTests: XCTestCase {
         buffer.apply(.progress(percent: 0.4, mode: .precise, message: nil))
         XCTAssertEqual(buffer.mode, .precise)
     }
+
+    /// The idle watchdog keys off this counter. It must tick for anything that
+    /// means "work is happening" and stay put for handshake/retraction, which
+    /// would otherwise keep an invisible island's timer alive forever.
+    func testActivityTickCountsProgressAndDoneOnly() {
+        let buffer = ProgressBuffer()
+        XCTAssertEqual(buffer.activityTick, 0)
+
+        buffer.apply(.hello(version: 1))
+        XCTAssertEqual(buffer.activityTick, 0, "握手不算活动")
+
+        buffer.apply(.progress(percent: 0.2, mode: .estimated, message: nil))
+        XCTAssertEqual(buffer.activityTick, 1)
+
+        buffer.apply(.progress(percent: 0.2, mode: .estimated, message: nil))
+        XCTAssertEqual(buffer.activityTick, 2, "即使 percent 相同也要计数")
+
+        buffer.apply(.done(reason: "completed", ok: true))
+        XCTAssertEqual(buffer.activityTick, 3)
+
+        buffer.apply(.bye)
+        XCTAssertEqual(buffer.activityTick, 3, "bye 不算活动")
+    }
 }
