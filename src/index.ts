@@ -281,7 +281,6 @@ export function apply(ctx: Context, config: Config): void {
       // A running agent means work is genuinely in progress, so silence is
       // expected rather than abandonment — this keeps the island up through a
       // long tool call that emits nothing for minutes.
-      //
       if (snapshot.agentRunning) {
         bumpIdle()
         return
