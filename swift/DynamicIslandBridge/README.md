@@ -1,6 +1,6 @@
 # DynamicIslandBridge
 
-`dsh-dynamic-island-progress` 的原生辅助进程：在 macOS 刘海区渲染当前 DSH 任务的完成百分比。
+`dsh-island-mac` 的原生辅助进程：在 macOS 刘海区渲染当前 DSH 任务的完成百分比。
 
 它没有主窗口、没有 Dock 图标、不抢焦点（`NSApplication.setActivationPolicy(.accessory)`），
 随插件生命周期启动与终止。

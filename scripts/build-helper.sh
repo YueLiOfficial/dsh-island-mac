@@ -142,6 +142,27 @@ STAGED="$OUT.staged.$$"
 cp "$BUILT" "$STAGED"
 chmod +x "$STAGED"
 mv -f "$STAGED" "$OUT"
+
+# Re-sign explicitly. What `ld` leaves behind is MARKED `linker-signed` but is NOT
+# accepted by taskgated at exec time on this macOS: every fresh spawn died in
+# ~16ms with `CODESIGNING / Taskgated Invalid Signature` +
+# `SIGKILL (Code Signature Invalid)`, while `codesign --verify` reported "code
+# object is not signed at all" even though an adhoc CodeDirectory was present.
+#
+# The failure is invisible at build time and only surfaces LATER, when a restart
+# is attempted — which is exactly the "plugin looks dead but the process is still
+# alive" symptom. `codesign --force --sign -` rewrites the CodeDirectory and adds
+# the CMS slot the linker omitted; verified to turn "not signed at all" into
+# "valid on disk / satisfies its Designated Requirement".
+#
+# Runs AFTER the rename so the signed bytes are the installed bytes.
+#
+# NOT the `cp`-over-a-running-binary trap documented above: that one also
+# surfaces as `Killed: 9`, but the file verifies fine and only the *next* exec is
+# killed. Same symptom, different cause; only this step addresses this one.
+echo "==> 重新 ad-hoc 签名（否则 taskgated 会在 exec 时杀掉 helper）"
+codesign --force --sign - --timestamp=none "$OUT"
+codesign --verify --verbose=1 "$OUT"
 echo "==> 已安装到 $OUT"
 
 # Real check, not `|| true`: a helper that cannot print its version is a helper

@@ -64,7 +64,7 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(lines.count, 1)
         XCTAssertEqual(
             decodeMessage(lines[0]),
-            .progress(percent: 0.5, mode: .estimated, message: "正在编译")
+            .progress(percent: 0.5, mode: .estimated, message: "正在编译", task: nil)
         )
     }
 
@@ -80,32 +80,62 @@ final class ProtocolTests: XCTestCase {
 
     func testDecodesProgress() {
         let m = decodeMessage("{\"type\":\"progress\",\"percent\":0.42,\"mode\":\"precise\"}")
-        guard case .progress(let p, let mode, _)? = m else { return XCTFail("未解析为 progress") }
+        guard case .progress(let p, let mode, _, _)? = m else { return XCTFail("未解析为 progress") }
         XCTAssertEqual(p, 0.42, accuracy: 0.0001)
         XCTAssertEqual(mode, .precise)
     }
 
     func testDecodesProgressWithNonASCIIText() {
         let m = decodeMessage("{\"type\":\"progress\",\"percent\":0.5,\"mode\":\"estimated\",\"message\":\"正在编译 ①✓\"}")
-        guard case .progress(_, _, let msg)? = m else { return XCTFail("未解析") }
+        guard case .progress(_, _, let msg, _)? = m else { return XCTFail("未解析") }
         XCTAssertEqual(msg, "正在编译 ①✓")
     }
 
     func testDecodesProgressWithoutMessage() {
         let m = decodeMessage("{\"type\":\"progress\",\"percent\":0.1,\"mode\":\"estimated\"}")
-        guard case .progress(_, _, let msg)? = m else { return XCTFail("未解析") }
+        guard case .progress(_, _, let msg, _)? = m else { return XCTFail("未解析") }
         XCTAssertNil(msg)
+    }
+
+    func testDecodesProgressTask() {
+        let m = decodeMessage("{\"type\":\"progress\",\"percent\":0.5,\"mode\":\"precise\",\"task\":\"运行测试\"}")
+        guard case .progress(_, _, _, let task)? = m else { return XCTFail("未解析") }
+        XCTAssertEqual(task, "运行测试")
+    }
+
+    /// The field is optional: frames without it are the common case.
+    func testDecodesProgressWithoutTask() {
+        let m = decodeMessage("{\"type\":\"progress\",\"percent\":0.5,\"mode\":\"precise\"}")
+        guard case .progress(_, _, _, let task)? = m else { return XCTFail("未解析") }
+        XCTAssertNil(task)
+    }
+
+    func testMessageAndTaskDecodeIndependently() {
+        let line = "{\"type\":\"progress\",\"percent\":0.5,\"mode\":\"precise\","
+            + "\"message\":\"状态行\",\"task\":\"任务标签\"}"
+        guard case .progress(_, _, let msg, let task)? = decodeMessage(line) else {
+            return XCTFail("未解析")
+        }
+        XCTAssertEqual(msg, "状态行")
+        XCTAssertEqual(task, "任务标签")
+    }
+
+    /// A present-but-wrong-typed `task` is a protocol violation, matching how
+    /// `message` is treated — not silently coerced or dropped.
+    func testRejectsNonStringTask() {
+        XCTAssertNil(decodeMessage("{\"type\":\"progress\",\"percent\":0.5,\"mode\":\"precise\",\"task\":42}"))
+        XCTAssertNil(decodeMessage("{\"type\":\"progress\",\"percent\":0.5,\"mode\":\"precise\",\"task\":null}"))
     }
 
     func testClampsPercentAboveOne() {
         let m = decodeMessage("{\"type\":\"progress\",\"percent\":1e9,\"mode\":\"precise\"}")
-        guard case .progress(let p, _, _)? = m else { return XCTFail("未解析") }
+        guard case .progress(let p, _, _, _)? = m else { return XCTFail("未解析") }
         XCTAssertEqual(p, 1.0)
     }
 
     func testClampsNegativePercent() {
         let m = decodeMessage("{\"type\":\"progress\",\"percent\":-5,\"mode\":\"precise\"}")
-        guard case .progress(let p, _, _)? = m else { return XCTFail("未解析") }
+        guard case .progress(let p, _, _, _)? = m else { return XCTFail("未解析") }
         XCTAssertEqual(p, 0.0)
     }
 

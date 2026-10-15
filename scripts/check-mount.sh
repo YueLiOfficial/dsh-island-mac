@@ -5,17 +5,26 @@ set -uo pipefail
 
 PATCH="${DSH_PROFILE_DIR:-$HOME/.dsh/profiles/desktop}/cordis.patch.yml"
 
+# Read, never hardcode: this repo has been renamed twice, and a literal here
+# silently asserts the OLD name — failing a correct mount, or passing a stale
+# one. The package name is an input to this script, not a constant.
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+PKG="$(node -e "console.log(require(process.argv[1]).name)" "$REPO/package.json" 2>/dev/null || true)"
+if [ -z "$PKG" ]; then
+  echo "✖ 读不出 $REPO/package.json 的 name" >&2; exit 1
+fi
+
 echo "==> 目标文件: $PATCH"
 if [ ! -f "$PATCH" ]; then
   echo "✖ 文件不存在"; exit 1
 fi
 
-echo "==> 1. 是否包含本插件条目"
-if grep -q "dsh-dynamic-island-progress" "$PATCH"; then
+echo "==> 1. 是否包含本插件条目（包名 ${PKG}）"
+if grep -q "$PKG" "$PATCH"; then
   echo "    找到条目："
-  grep -n -B3 -A2 "dsh-dynamic-island-progress" "$PATCH" | sed 's/^/      /'
+  grep -n -B3 -A2 "$PKG" "$PATCH" | sed 's/^/      /'
 else
-  echo "✖ 未找到 dsh-dynamic-island-progress —— 条目没写进去？"
+  echo "✖ 未找到 $PKG —— 条目没写进去？"
   exit 1
 fi
 
@@ -24,18 +33,20 @@ echo "==> 2. YAML 是否可解析（用 node 的 yaml 若可用，否则做结�
 if node -e '
 const fs=require("fs");
 const t=fs.readFileSync(process.argv[1],"utf8");
+const pkg=process.argv[2];
 // 去掉注释行后，确认存在 "- insert:" 且其下 name 属于该 insert
 const lines=t.split(/\r?\n/);
 let inInsert=false, ok=false;
 for(const l of lines){
   if(/^\s*#/.test(l)) continue;
   if(/^-\s*insert:\s*$/.test(l)){ inInsert=true; continue; }
-  if(inInsert && /^\s*-\s*id:\s*dynamic-island-progress\s*$/.test(l)) continue;
-  if(inInsert && /^\s*name:\s*dsh-dynamic-island-progress\s*$/.test(l)){ ok=true; }
+  // 接受当前 id 与两个历史 id，让脚本在迁移期间对旧挂载也成立。
+  if(inInsert && /^\s*-\s*id:\s*dynamic-island(-progress|-macos)?\s*$/.test(l)) continue;
+  if(inInsert && new RegExp("^\\s*name:\\s*" + pkg.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s*$").test(l)){ ok=true; }
   if(/^[^\s]/.test(l) && !/^-\s*insert:/.test(l)) inInsert=false;
 }
 process.exit(ok?0:1);
-' "$PATCH"; then
+' "$PATCH" "$PKG"; then
   echo "    结构 OK（- insert: 下含正确 name）"
 else
   echo "✖ 结构可疑：insert 下未找到正确的 name 行"

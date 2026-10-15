@@ -99,7 +99,7 @@ final class SocketServerTests: XCTestCase {
     func testReceivesProgressMessage() throws {
         let exp = expectation(description: "收到 progress")
         let server = try makeServer { msg in
-            if case .progress(let percent, _, _) = msg {
+            if case .progress(let percent, _, _, _) = msg {
                 XCTAssertEqual(percent, 0.42, accuracy: 0.001)
                 exp.fulfill()
             }
@@ -135,7 +135,7 @@ final class SocketServerTests: XCTestCase {
     func testReassemblesSplitMultibyteFrame() throws {
         let exp = expectation(description: "收到完整中文帧")
         let server = try makeServer { msg in
-            if case .progress(_, _, let message) = msg, message == "正在编译" {
+            if case .progress(_, _, let message, _) = msg, message == "正在编译" {
                 exp.fulfill()
             }
         }

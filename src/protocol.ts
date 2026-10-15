@@ -9,7 +9,14 @@
 
 export type OutboundMessage =
   | { type: 'hello'; version: number }
-  | { type: 'progress'; percent: number; mode: 'estimated' | 'precise'; message?: string }
+  | {
+      type: 'progress'
+      percent: number
+      mode: 'estimated' | 'precise'
+      message?: string
+      /** Short description of the work in progress, for the hover panel. */
+      task?: string
+    }
   | { type: 'done'; reason: string; ok: boolean }
   | { type: 'bye' }
 

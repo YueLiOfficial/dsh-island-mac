@@ -54,7 +54,7 @@ test('todo 加权公式：无任何完成项时也反映进行中的工作', () 
   assert.ok(r.snapshot.percent > 0, '不应显示 0%')
 })
 
-test('todo 加权公式：全部完成时必须恰为 1.0', () => {
+test('todo 全部完成时比值仍恰为 1.0，但显示值封顶 0.9', () => {
   const m = new ProgressMachine()
   reduceSessionEvent(m, ev('turn/start', { turn: 1 }))
   const r = reduceSessionEvent(m, ev('todo/write', {
@@ -65,8 +65,32 @@ test('todo 加权公式：全部完成时必须恰为 1.0', () => {
     ],
   }))
   // (3 + 0) / 3 = 1.0，不得因浮点误差变成 0.999…
+  // 比值是「清单的观察」，仍然如实报告。
   assert.equal(r.todoRatio, 1)
-  assert.equal(r.snapshot.percent, 1)
+  // 但显示值封顶：100% 必须只表示「这个 turn 结束了」。
+  assert.equal(r.snapshot.percent, 0.9)
+})
+
+test('清单全完成但 turn 未结束时停在 90%，只有 turn/end completed 才到 100%', () => {
+  const m = new ProgressMachine()
+  reduceSessionEvent(m, ev('turn/start', { turn: 1 }))
+  reduceSessionEvent(m, ev('todo/write', {
+    todos: [
+      { content: 'a', status: 'completed' },
+      { content: 'b', status: 'completed' },
+    ],
+  }))
+  // 收尾阶段：模型还会继续调用工具，值不得声称完成。
+  const during = reduceSessionEvent(m, ev('tool/call', {
+    turn: 1,
+    step: 2,
+    name: 'Read',
+    arguments: JSON.stringify({ file_path: 'a.ts' }),
+  }))
+  assert.equal(during.snapshot.percent, 0.9)
+  // 真正的完成信号。
+  const done = reduceSessionEvent(m, ev('turn/end', { turn: 1, reason: { kind: 'completed' } }))
+  assert.equal(done.snapshot.percent, 1)
 })
 
 test('todo 项数增加导致比值下降时，显示值保持不变（单调度）', () => {
@@ -142,11 +166,88 @@ test('无关注事件返回 changed=false 且不触碰状态', () => {
   const m = new ProgressMachine()
   reduceSessionEvent(m, ev('turn/start', { turn: 1 }))
   const before = m.snapshot()
-  for (const t of ['user/message', 'assistant/message', 'tool/call', 'request/context', 'plan/mode', '未来/未知']) {
-    const r = reduceSessionEvent(m, ev(t, { anything: true }))
+  // 载荷刻意是合法形状：这样若将来有人误把某个事件类型接进进度通道，断言会因为
+  // 「类型被识别」而失败，而不是因为载荷畸形而侥幸通过。
+  for (const t of ['user/message', 'assistant/message', 'request/context', 'plan/mode', '未来/未知']) {
+    const r = reduceSessionEvent(m, ev(t, { turn: 1, step: 1, name: 'Bash', arguments: '{}' }))
     assert.equal(r.changed, false, `${t} 被误认为进度事件`)
   }
   assert.deepEqual(m.snapshot(), before)
+})
+
+test('tool/call 只设置当前任务标签，不碰百分比', () => {
+  const m = new ProgressMachine()
+  reduceSessionEvent(m, ev('turn/start', { turn: 1 }))
+  const before = m.snapshot().percent
+  const r = reduceSessionEvent(m, ev('tool/call', {
+    turn: 1,
+    step: 1,
+    callId: 'c1',
+    name: 'Bash',
+    arguments: JSON.stringify({ command: 'pnpm test', description: '运行测试' }),
+  }))
+  assert.equal(r.changed, true)
+  assert.equal(r.snapshot.currentTask, '运行测试')
+  assert.equal(r.snapshot.percent, before, 'tool/call 不得改动进度')
+  assert.equal(r.todoRatio, null)
+})
+
+test('tool/call 缺少可读工具名时不改动状态（changed=false）', () => {
+  const m = new ProgressMachine()
+  reduceSessionEvent(m, ev('turn/start', { turn: 1 }))
+  const before = m.snapshot()
+  for (const bad of [null, undefined, 42, {}, { name: '' }, { name: '   ' }]) {
+    assert.doesNotThrow(() => reduceSessionEvent(m, ev('tool/call', bad)))
+    const r = reduceSessionEvent(m, ev('tool/call', bad))
+    assert.equal(r.changed, false)
+  }
+  assert.deepEqual(m.snapshot(), before)
+})
+
+test('todo/write 的 in_progress 项提供任务标签', () => {
+  const m = new ProgressMachine()
+  reduceSessionEvent(m, ev('turn/start', { turn: 1 }))
+  const r = reduceSessionEvent(m, ev('todo/write', {
+    todos: [
+      { content: '写文档', status: 'completed' },
+      { content: '修签名 bug', status: 'in_progress' },
+      { content: '跑测试', status: 'pending' },
+    ],
+  }))
+  assert.equal(r.snapshot.currentTask, '修签名 bug')
+})
+
+test('后到的 todo/write 覆盖先前的工具标签（todo 优先）', () => {
+  const m = new ProgressMachine()
+  reduceSessionEvent(m, ev('turn/start', { turn: 1 }))
+  reduceSessionEvent(m, ev('tool/call', {
+    turn: 1, step: 1, name: 'Bash', arguments: JSON.stringify({ command: 'ls' }),
+  }))
+  assert.equal(m.snapshot().currentTask, '执行命令：ls')
+  const r = reduceSessionEvent(m, ev('todo/write', {
+    todos: [{ content: '实现悬停标签', status: 'in_progress' }],
+  }))
+  assert.equal(r.snapshot.currentTask, '实现悬停标签')
+})
+
+test('新 turn 清空上一轮的任务标签，避免悬停时显示已结束的工作', () => {
+  const m = new ProgressMachine()
+  reduceSessionEvent(m, ev('turn/start', { turn: 1 }))
+  reduceSessionEvent(m, ev('tool/call', {
+    turn: 1, step: 1, name: 'Bash', arguments: JSON.stringify({ command: 'ls' }),
+  }))
+  assert.equal(m.snapshot().currentTask, '执行命令：ls')
+  const r = reduceSessionEvent(m, ev('turn/start', { turn: 2 }))
+  assert.equal(r.snapshot.currentTask, undefined)
+})
+
+test('task 字段对所有 snapshot 调用方都存在（含 reset）', () => {
+  const m = new ProgressMachine()
+  const keys = Object.keys(m.snapshot())
+  for (const k of ['state', 'percent', 'mode', 'message', 'currentTask', 'turn', 'ok']) {
+    assert.ok(keys.includes(k), `snapshot 缺少 ${k}`)
+  }
+  assert.equal(m.reset().currentTask, undefined)
 })
 
 test('事件重放（同一 turn/start 重复）不倒退', () => {

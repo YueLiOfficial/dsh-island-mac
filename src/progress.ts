@@ -15,6 +15,13 @@ export interface ProgressSnapshot {
   percent: number
   mode: ProgressMode | null
   message: string | undefined
+  /**
+   * Short human-readable description of what is happening right now, shown in
+   * the expanded (hover) panel. Distinct from `message`: that one is a status
+   * line the model or a terminal signal supplied, while this is derived from the
+   * event stream and changes as work moves on.
+   */
+  currentTask: string | undefined
   turn: number | null
   ok: boolean
 }
@@ -26,8 +33,12 @@ const TURN_START_PERCENT = 0.05
  * Hard ceiling for the estimate layer, as a fraction. The estimator itself
  * caps at 90%; this re-asserts it so no future estimator change can let an
  * estimate claim completion.
+ *
+ * Exported because it is also the ceiling for a whole-list todo ratio: 100% must
+ * mean "the turn ended", and a fully-ticked todo list is not that. Keeping one
+ * constant for both keeps the two paths from drifting apart.
  */
-const ESTIMATE_CEILING = 0.9
+export const ESTIMATE_CEILING = 0.9
 
 /**
  * The single source of truth for displayed progress.
@@ -50,6 +61,7 @@ export class ProgressMachine {
   private percent = 0
   private mode: ProgressMode | null = null
   private message: string | undefined = undefined
+  private currentTask: string | undefined = undefined
   private turn: number | null = null
   private ok = true
 
@@ -71,8 +83,27 @@ export class ProgressMachine {
     this.percent = TURN_START_PERCENT
     this.mode = 'estimated'
     this.message = undefined
+    // A task label from the previous turn describes work that is over; carrying
+    // it forward would show a stale line until the new turn's first tool call.
+    this.currentTask = undefined
     this.turn = turn
     this.ok = true
+    return this.snapshot()
+  }
+
+  /**
+   * Records what is happening now, for the hover panel.
+   *
+   * Deliberately does NOT count as progress: a label arrives on events that say
+   * nothing about completion, and treating one as progress would let the
+   * displayed percentage move on no evidence. Callers pair this with whatever
+   * percentage event they are already handling.
+   *
+   * `undefined` is ignored rather than stored, so a payload with no readable
+   * text cannot blank a label that is already showing.
+   */
+  setCurrentTask(task: string | undefined): ProgressSnapshot {
+    if (task !== undefined && task.length > 0) this.currentTask = task
     return this.snapshot()
   }
 
@@ -128,6 +159,7 @@ export class ProgressMachine {
     this.percent = 0
     this.mode = null
     this.message = undefined
+    this.currentTask = undefined
     this.turn = null
     this.ok = true
     return this.snapshot()
@@ -140,6 +172,7 @@ export class ProgressMachine {
       percent: this.percent,
       mode: this.mode,
       message: this.message,
+      currentTask: this.currentTask,
       turn: this.turn,
       ok: this.ok,
     }

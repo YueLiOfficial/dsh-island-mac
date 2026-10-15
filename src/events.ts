@@ -1,4 +1,6 @@
 import type { ProgressMachine, ProgressSnapshot } from './progress.ts'
+import { ESTIMATE_CEILING } from './progress.ts'
+import { currentTaskFromTodos, currentTaskFromToolCall } from './task.ts'
 
 /**
  * The minimal shape this reducer needs from a durable session event.
@@ -58,6 +60,27 @@ function readStep(data: unknown): number | null {
   if (!isRecord(data)) return null
   const step = data.step
   return typeof step === 'number' && Number.isFinite(step) ? step : null
+}
+
+/** Reads `data.name` (a `tool/call`'s tool name) as a string, or null. */
+function readToolName(data: unknown): string | null {
+  if (!isRecord(data)) return null
+  const name = data.name
+  return typeof name === 'string' && name.trim().length > 0 ? name : null
+}
+
+/**
+ * Reads `data.arguments` — a `tool/call`'s UNPARSED arguments JSON string.
+ *
+ * Returned as-is: parsing belongs to `task.ts`, which owns the degradation rules
+ * for model-produced JSON. A non-string becomes `undefined` rather than being
+ * coerced, so a malformed payload yields the tool's generic label instead of a
+ * bogus one.
+ */
+function readToolArguments(data: unknown): string | undefined {
+  if (!isRecord(data)) return undefined
+  const args = data.arguments
+  return typeof args === 'string' ? args : undefined
 }
 
 /**
@@ -129,14 +152,46 @@ function onTurnEnd(machine: ProgressMachine, data: unknown): ReductionResult {
 
 function onTodoWrite(machine: ProgressMachine, data: unknown): ReductionResult {
   const ratio = computeTodoRatio(data)
+  // The label is read even when the ratio is unusable: a list whose statuses are
+  // unreadable can still name the work in progress.
+  const task = currentTaskFromTodos(data)
   if (ratio === null) {
-    // Nothing trustworthy to report: leave the machine exactly as it was.
-    return { changed: true, snapshot: machine.snapshot(), todoRatio: null }
+    // Nothing trustworthy to report on the percentage: leave it exactly as it
+    // was, but still take the label.
+    if (task === null) return { changed: false, snapshot: machine.snapshot(), todoRatio: null }
+    return { changed: true, snapshot: machine.setCurrentTask(task), todoRatio: null }
   }
+
   // A whole-list snapshot is a trustworthy ratio, so it locks the machine to
   // `precise` rather than being treated as a guess.
-  const snapshot = machine.reportPrecise(ratio, 'todo')
+  //
+  // The reported value is capped at ESTIMATE_CEILING: 100% must mean "this turn
+  // ended", and a fully-ticked list does NOT mean that — the model often marks
+  // every item complete and then keeps working (writing the summary, verifying).
+  // Without this cap that tail showed 100% while the turn was still running, so
+  // the number could not be read as "done". The ratio itself is still returned
+  // verbatim in `todoRatio`, which is an observation about the list, not about
+  // the display.
+  const reported = Math.min(ESTIMATE_CEILING, ratio)
+  if (task !== null) machine.setCurrentTask(task)
+  const snapshot = machine.reportPrecise(reported, 'todo')
   return { changed: true, snapshot, todoRatio: ratio }
+}
+
+/**
+ * A tool is starting. Only the label changes: the call tells us *what* is
+ * happening, never how far along it is, so it must not touch the percentage.
+ *
+ * An unreadable name yields no label and therefore no state change at all, so a
+ * malformed payload cannot force a pointless socket write.
+ */
+function onToolCall(machine: ProgressMachine, data: unknown): ReductionResult {
+  const name = readToolName(data)
+  if (name === null) return { changed: false, snapshot: machine.snapshot(), todoRatio: null }
+
+  const task = currentTaskFromToolCall(name, readToolArguments(data))
+  if (task === null) return { changed: false, snapshot: machine.snapshot(), todoRatio: null }
+  return { changed: true, snapshot: machine.setCurrentTask(task), todoRatio: null }
 }
 
 // ---------------------------------------------------------------------------
@@ -165,6 +220,8 @@ export function reduceSessionEvent(machine: ProgressMachine, event: SessionEvent
       return onTurnEnd(machine, event.data)
     case 'todo/write':
       return onTodoWrite(machine, event.data)
+    case 'tool/call':
+      return onToolCall(machine, event.data)
     default:
       // Not a progress anchor. Return without touching the machine so the
       // caller can skip an unnecessary socket write.

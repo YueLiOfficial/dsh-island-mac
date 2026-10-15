@@ -1,6 +1,6 @@
 {
-  "name": "dsh-dynamic-island-progress",
-  "version": "0.1.0",
+  "name": "dsh-island-mac",
+  "version": "0.2.0",
   "description": "在 macOS 刘海/灵动岛区域显示当前 dsh 任务的完成百分比",
   "license": "MIT",
   "type": "module",
@@ -25,7 +25,8 @@
     "src",
     "cordis.patch.yml",
     "bin",
-    "THIRD_PARTY_NOTICES.md"
+    "THIRD_PARTY_NOTICES.md",
+    "docs/RELEASE-v0.2.0.md"
   ],
   "scripts": {
     "test": "node --test 'test/**/*.test.ts'",

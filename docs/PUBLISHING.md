@@ -3,12 +3,13 @@
 发布物是一个 **dsh bundle**（一个 npm 包），用户通过应用内的**插件管理器**安装。
 本文记录发布步骤，以及踩过的坑 —— 它们都会让「装上了但不工作」。
 
-## 发布前必须成立的三件事
+## 发布前必须成立的几件事
 
 | 要求 | 为什么 | 谁保证 |
 |---|---|---|
 | `main` 指向**编译后的 JS** | Node 拒绝为 `node_modules` 下的文件剥离 TypeScript 类型（`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`）。`main: src/index.ts` 在 linked checkout 里能跑，一装进 node_modules 就 `failed to import` | `scripts/build-bundle.sh`（`prepack` 会跑） |
 | `bin/DynamicIslandBridge` 是 **universal**（arm64 + x86_64），且 helper 自包含 | 只编本机架构 → Intel Mac 直接装不上；helper 若依赖同目录的 `.bundle`，复制/打包后就崩 | `scripts/build-helper.sh`（默认 universal，并断言 minos/架构）；图标以 base64 内嵌在 `WhaleMarkData.swift` |
+| `bin/DynamicIslandBridge` **必须被显式 ad-hoc 重新签名** | SwiftPM 只留下 `linker-signed` 的 CodeDirectory，macOS 26 的 taskgated 在 exec 时拒绝它：每次 spawn 在 ~16ms 内 `SIGKILL (Code Signature Invalid)`。**构建时看不出来**，要到下一次重启 helper 才暴露，症状是「进程还在但界面不动」 | `scripts/build-helper.sh` 在 rename 安装后跑 `codesign --force --sign -`，并用末尾的 `--version` 自检兜底。**不要删掉这一步** |
 | `@deepseek-ai/dsh-*` 的 peer 范围能被**运行时版本**满足 | 安装前应用会把运行时 dsh 版本代进这些范围求值，不满足就拒绝安装（除非授精确版本豁免） | `package.json` 里 `dsh-tools: "*"`；`cordis`、`schemastery` 不匹配 `dsh-*` 前缀，不参与门禁 |
 
 ## 两条发布渠道
@@ -23,7 +24,7 @@ bash scripts/verify-packed-tarball.sh --boot     # 打包 → 装进一次性 pr
 
 ```sh
 npm run build                       # 编译 lib/ + universal helper
-npx pnpm pack                       # 产出 dsh-dynamic-island-progress-<version>.tgz
+npx pnpm pack                       # 产出 dsh-island-mac-<version>.tgz
 ```
 
 把 `.tgz` 交给使用者，他们在**插件管理器 → 添加插件**里填这个文件路径即可。
@@ -43,7 +44,7 @@ npm publish        # prepack 会先构建；files 白名单决定装什么
 之后用户只需在插件管理器里填包名：
 
 ```
-dsh-dynamic-island-progress
+dsh-island-mac
 ```
 
 发布前建议先确认包名在 registry 上可用，并想清楚

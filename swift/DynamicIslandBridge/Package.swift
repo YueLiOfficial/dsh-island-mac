@@ -1,7 +1,7 @@
 // swift-tools-version: 6.0
 import PackageDescription
 
-// DynamicIslandBridge is the native helper behind the dsh-dynamic-island-progress
+// DynamicIslandBridge is the native helper behind the dsh-island-mac
 // plugin. The plugin is the socket *client*; this process is the *server*.
 //
 // DynamicNotchKit is the only third-party dependency. It is a SwiftUI package, so

@@ -114,6 +114,24 @@ struct ProgressDetail: View {
                     .foregroundStyle(DetailPalette.secondaryForeground(usesFloatingStyle: usesFloatingStyle))
                     .lineLimit(2)
             }
+
+            // What is happening right now. Rendered unconditionally (rather than
+            // hidden when empty) so the panel keeps a stable height and hovering
+            // always reveals the same field, with "等待中" before the first
+            // labelled event of a turn.
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text("当前任务")
+                    .font(.system(size: 10))
+                    .foregroundStyle(DetailPalette.secondaryForeground(usesFloatingStyle: usesFloatingStyle))
+                Text(buffer.currentTask ?? "等待中")
+                    .font(.system(size: 11))
+                    .foregroundStyle(DetailPalette.foreground(usesFloatingStyle: usesFloatingStyle))
+                    // The full label is on the wire (the plugin caps it at 80
+                    // code points); three lines is what fits the panel, so this
+                    // is where the layout — not the protocol — sets the limit.
+                    .lineLimit(3)
+                    .truncationMode(.tail)
+            }
         }
         .foregroundStyle(DetailPalette.foreground(usesFloatingStyle: usesFloatingStyle))
         .frame(width: 260)

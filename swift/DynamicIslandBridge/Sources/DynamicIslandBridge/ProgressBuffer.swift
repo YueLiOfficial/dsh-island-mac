@@ -29,6 +29,12 @@ public final class ProgressBuffer: ObservableObject {
     @Published public private(set) var percent: Double = 0
     @Published public private(set) var mode: ProgressMode = .estimated
     @Published public private(set) var message: String?
+    /// Short description of the work in progress, for the hover panel.
+    ///
+    /// Kept separate from `message` so the two can be shown on different lines:
+    /// `message` is a status line a terminal signal supplied, this is derived
+    /// continuously from the event stream.
+    @Published public private(set) var currentTask: String?
     @Published public private(set) var isVisible = false
     @Published public private(set) var phase: Phase = .idle
 
@@ -49,12 +55,15 @@ public final class ProgressBuffer: ObservableObject {
             // pill on every plugin reconnect, before any work has happened.
             break
 
-        case let .progress(percent, mode, message):
+        case let .progress(percent, mode, message, task):
             self.percent = min(1, max(0, percent))
             self.mode = mode
             // Only overwrite when the sender supplied one: a progress update
             // without a message must not blank the status line mid-turn.
             if let message { self.message = message }
+            // Absent is the common case (most frames carry no new label), and a
+            // frame without one must not blank the line that is already showing.
+            if let task { self.currentTask = task }
             self.isVisible = true
             self.phase = .running
             self.activityTick &+= 1
@@ -76,6 +85,9 @@ public final class ProgressBuffer: ObservableObject {
             self.phase = .idle
             self.percent = 0
             self.message = nil
+            // The task label belongs to the turn that just ended; leaving it
+            // would show stale work on the next turn's first hover.
+            self.currentTask = nil
         }
     }
 

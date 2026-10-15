@@ -1,4 +1,4 @@
 - insert:
-    - id: dynamic-island-progress
-      name: dsh-dynamic-island-progress
+    - id: dynamic-island
+      name: dsh-island-mac
       config: {}

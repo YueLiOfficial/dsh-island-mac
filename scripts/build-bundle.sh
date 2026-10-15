@@ -28,7 +28,7 @@ rm -rf lib
 # package installs and then silently fails to activate.
 MAIN="$(node -e "console.log(require('./package.json').main)")"
 if [ ! -f "$MAIN" ]; then
-  echo "✖ package.json 的 main 指向 $MAIN，但构建没有产出它" >&2
+  echo "✖ package.json 的 main 指向 ${MAIN}，但构建没有产出它" >&2
   exit 1
 fi
 if grep -rqE "from ['\"]\.[^'\"]*\.ts['\"]" lib/; then

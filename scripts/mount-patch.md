@@ -18,9 +18,9 @@ CLI 拒绝碰它，所以安装必须走应用内的**插件管理器**（Plugin
 
 | 形态 | 例子 |
 |---|---|
-| 包名（可带版本） | `dsh-dynamic-island-progress@0.1.0` |
-| Git 地址 | `github:you/dsh-dynamic-island` |
-| 压缩包 | `/path/to/dsh-dynamic-island-progress-0.1.0.tgz` |
+| 包名（可带版本） | `dsh-island-mac@0.2.0` |
+| Git 地址 | `github:you/dsh-island-mac` |
+| 压缩包 | `/path/to/dsh-island-mac-0.2.0.tgz` |
 | **本地绝对路径** | `/Users/yueli/Code/dsh_plugins/dsh-dynamic-island` |
 
 开发这个仓库时用**本地绝对路径**：把仓库根目录的绝对路径粘进去。
@@ -34,7 +34,7 @@ CLI 拒绝碰它，所以安装必须走应用内的**插件管理器**（Plugin
 | `.tgz` 文件路径（推荐） | 无 | 包里已经带好编译后的 `lib/` 与 universal helper，最省事 |
 | 仓库绝对路径 | **先 `npm run build`** | 本地目录安装不会跑 `prepack`，缺 `lib/` 就会 `failed to import` |
 
-本仓库根目录下已有一份打包好的 `dsh-dynamic-island-progress-0.1.0.tgz`，可以直接用它。
+本仓库根目录下已有一份打包好的 `dsh-island-mac-0.2.0.tgz`，可以直接用它。
 自己重新打包见 [docs/PUBLISHING.md](../docs/PUBLISHING.md)。
 
 **`cordis.patch.yml` 一个字都不用改**：包里的 `dsh.bundle.patch` 在它被登记为
@@ -78,7 +78,7 @@ lsof -U | grep island.sock
 ```yaml
 - insert:
     - id: dynamic-island-progress
-      name: dsh-dynamic-island-progress
+      name: dsh-island-mac
       config:
         connectTimeoutMs: 20000
 ```
@@ -91,7 +91,7 @@ lsof -U | grep island.sock
 
 | 写法 | 结果 |
 |---|---|
-| `name: dsh-dynamic-island-progress` | profile 的 `node_modules` 里没有这个包 → Node 模块解析报 `MODULE_NOT_FOUND` → 该行被**静默丢弃**，`--dump-config` 里连痕迹都没有 |
+| `name: dsh-island-mac` | profile 的 `node_modules` 里没有这个包 → Node 模块解析报 `MODULE_NOT_FOUND` → 该行被**静默丢弃**，`--dump-config` 里连痕迹都没有 |
 | `name: /abs/path/to/src/index.ts` | profile patch 层的 `name` 不是任意文件路径，同样不生效 |
 
 根本区别是两套机制里 `name` 的语义不同：

@@ -161,6 +161,7 @@ export function apply(ctx: Context, config: Config): void {
       percent: snapshot.percent,
       mode: snapshot.mode ?? 'estimated',
       ...(snapshot.message === undefined ? {} : { message: snapshot.message }),
+      ...(snapshot.currentTask === undefined ? {} : { task: snapshot.currentTask }),
     })
   }
 

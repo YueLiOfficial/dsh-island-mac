@@ -21,7 +21,13 @@ public enum InboundMessage: Sendable, Equatable {
     /// Handshake. Carries the plugin's protocol version.
     case hello(version: Int)
     /// Progress update. `percent` is a 0...1 fraction, already clamped.
-    case progress(percent: Double, mode: ProgressMode, message: String?)
+    ///
+    /// `message` is a status line the model or a terminal signal supplied;
+    /// `task` is a short derived description of what is happening right now
+    /// (the in-progress todo, else the running tool). They are separate because
+    /// they answer different questions and are rendered on different lines of the
+    /// expanded panel.
+    case progress(percent: Double, mode: ProgressMode, message: String?, task: String?)
     /// Terminal state. `ok == false` means the turn ended abnormally.
     case done(reason: String, ok: Bool)
     /// Retract the island and go back to waiting.
@@ -119,7 +125,16 @@ public func decodeMessage(_ line: String) -> InboundMessage? {
             guard let text = rawMessage as? String else { return nil }
             message = text
         }
-        return .progress(percent: min(1, max(0, percent)), mode: mode, message: message)
+
+        // Optional, and absent on every frame that carries no task label. A
+        // present-but-wrong-typed value is still a protocol violation, matching
+        // how `message` is treated.
+        var task: String?
+        if let rawTask = record["task"] {
+            guard let text = rawTask as? String else { return nil }
+            task = text
+        }
+        return .progress(percent: min(1, max(0, percent)), mode: mode, message: message, task: task)
 
     case "done":
         guard

@@ -17,6 +17,12 @@ const PROFILE = process.env.DSH_PROFILE_DIR ?? join(HOME, '.dsh', 'profiles', 'd
 const PATCH = join(PROFILE, 'cordis.patch.yml')
 const ENTRY = join(ROOT, 'src', 'index.ts')
 
+// Read, never hardcode: this repo has been renamed twice, and a literal here
+// silently asserts the OLD name — failing a correct mount, or passing a stale
+// one. The package name is an input to this script, not a constant.
+const PKG = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).name
+const PKG_RE = new RegExp(`^\\s*name:\\s*${PKG.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'm')
+
 let failures = 0
 const ok = (m) => console.log(`  ✔ ${m}`)
 const bad = (m) => { failures++; console.log(`  ✖ ${m}`) }
@@ -43,9 +49,12 @@ if (!existsSync(PATCH)) {
   bad(`找不到 ${PATCH}`)
 } else {
   const text = readFileSync(PATCH, 'utf8')
-  if (!text.includes('dynamic-island-progress')) bad('patch 里没有本插件条目')
+  // The layer id is what the bundle's own cordis.patch.yml inserts with; the
+  // package name is what a `name:`-style entry would use. Accept either, since
+  // both are observed in the wild depending on how the plugin was mounted.
+  if (!text.includes('dynamic-island') && !text.includes(PKG)) bad('patch 里没有本插件条目')
   else ok('patch 里有本插件条目')
-  const usesBareName = /^\s*name:\s*dsh-dynamic-island-progress\s*$/m.test(text)
+  const usesBareName = PKG_RE.test(text)
   const usesPath = text.includes(ENTRY)
   if (usesPath) ok('使用绝对路径引用（可解析）')
   else if (usesBareName) {

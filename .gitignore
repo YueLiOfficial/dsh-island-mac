@@ -1,12 +1,23 @@
+# --- 依赖与构建产物（不入库，由 prepack / npm run build 现场构建）---
 node_modules/
+bin/
+lib/
+*.tgz
+
+# --- 工具链缓存与本地环境 ---
 .npm-cache/
 .pnpm-store/
 .pnpm-home/
 .swift-cache/
 .build/
-bin/
-lib/
 swift/*/.build/
-.DS_Store
+
+# --- 开发过程产物（面向维护者，不是插件的一部分）---
+# 设计规格、实施计划、执行台账：这些是开发时的记录，会随实现演进而过期，
+# 留在仓库里只会让读者分不清哪份才是当前行为。面向贡献者的说明在
+# docs/DEVELOPMENT.md，面向使用者的说明在 README.md。
 .superpowers/
-*.tgz
+docs/superpowers/
+
+# --- 系统杂物 ---
+.DS_Store

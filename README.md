@@ -1,222 +1,209 @@
-# dsh-dynamic-island-progress
+# dsh-island-mac
 
-在 macOS 灵动岛 / 刘海区域显示当前 DSH 任务的完成百分比。
+在 macOS 的**刘海 / 灵动岛**区域实时显示 DSH 任务的进度。
 
-插件监听 DSH 的会话事件推导进度，通过 Unix socket 把进度推给一个原生 Swift 辅助进程，
-由它渲染灵动岛。辅助进程没有主窗口、没有 Dock 图标，随插件生命周期启动和终止。
-
-## 架构
+任务开始时它自动出现，结束时自动收起——**你不需要为了看到它而做任何事**。
 
 ```
-┌──────────────────────────────────────────────┐
-│ DSH 进程                                      │
-│   插件 (TypeScript)                           │
-│     index.ts     装配 / 单个 ctx.effect 生命周期 │
-│     progress.ts  进度状态机                    │
-│     events.ts    session/event 规约            │
-│     transport.ts Unix socket 客户端            │
-│     helper.ts    子进程 spawn / dispose        │
-│     tool.ts      report_progress 工具          │
-│     instructions.ts  systemPrompt 注入         │
-└─────────────┬────────────────────────────────┘
-              │ NDJSON over Unix socket
-              │ 插件 = client    辅助进程 = server
-              ▼
-┌──────────────────────────────────────────────┐
-│ Swift 辅助进程（DynamicNotchKit）              │
-│   bind + listen，收到进度即更新灵动岛           │
-└──────────────────────────────────────────────┘
+            ╭──────────╮
+   🐳  ⟢     │   42%    │     ← 刘海两侧：鲸鱼标识 + 完成百分比
+            ╰──────────╯
+
+   鼠标悬停时展开：
+   ┌────────────────────────────────┐
+   │ 任务进度                  42%  │
+   │ ▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░  │
+   │ 当前任务   运行测试             │
+   └────────────────────────────────┘
 ```
 
-**为什么辅助进程是 server**：它是容易重启的一方。让稳定的插件做重连方，
-失败处理比反过来简单——客户端断开后 server 只需回到 `accept`，不必退出。
+## 特性
+
+- **自动出现、自动收起**——不需要手动开关，也不占用 Dock 或菜单栏
+- **两路进度来源**：DSH 的待办清单（自动精确）+ 步骤估算，无需模型配合
+- **悬停显示当前任务**：从待办项或正在调用的工具推导出中文标签
+- **绝不谎称完成**：显示值上限 90%，**100% 只在回合真正结束时出现**
+- **失败可见**：异常结束（中断、报错）显示失败标记而不是 100%
+- **无刘海机型可用**：降级为悬停浮层（行为差异见下）
+
+## 环境要求
+
+| 项目 | 要求 |
+|---|---|
+| 系统 | macOS 13.0 或更高（实测于 macOS 26 / Apple Silicon） |
+| 架构 | Apple Silicon 与 Intel 均可（辅助进程是 universal 二进制） |
+| DSH | 需能加载 bundle 插件（自带 `dsh.bundle.patch`） |
 
 ## 安装
 
-### 装给别人用（正常路径）
+插件是一个 **dsh bundle**，安装走应用内的**插件管理器**（Plugin Manager → 添加插件）。
+那个输入框接受包名、`.tgz` 压缩包路径或**本地绝对路径**。
 
-插件是一个 **dsh bundle**，所以安装走应用内的**插件管理器**（Plugin Manager → 添加插件），
-**不需要手改任何 profile 文件**。那个输入框接受包名、Git 地址、`.tgz` 压缩包，
-或**本地绝对路径**；发布流程见 [docs/PUBLISHING.md](docs/PUBLISHING.md)。
+### 方式一：从压缩包安装（推荐）
 
-### 从本仓库开发
+1. 下载本仓库的 Release 附件 `dsh-island-mac-<版本>.tgz`
+2. 插件管理器 → 添加插件 → 填入该文件的绝对路径
+
+包里已经带好编译后的 JS 与 universal 原生辅助进程，**不需要**额外构建。
+
+### 方式二：从源码安装
 
 ```sh
-# 1) 安装依赖（npm cache 会重定向到工作区内，因为 ~/.npm 可能不可写）
-bash scripts/install-deps.sh
+git clone git@github.com:YueLiOfficial/dsh-island-mac.git
+cd dsh-island-mac
 
-# 2) 构建（需要完整 Xcode，见下）：编译 lib/ + universal helper
-bash scripts/build-bundle.sh
-
-# 3a) 推荐：把仓库根目录的 .tgz 填进插件管理器 → 添加插件
-node /path/to/pnpm.mjs pack      # 或直接 npm run build && npx pnpm pack
-
-# 3b) 或把本仓库的绝对路径填进去（**必须先 npm run build**，
-#     本地目录安装不会跑 prepack，缺 lib/ 会 failed to import）
+npm install          # 或 bash scripts/install-deps.sh
+npm run build        # 编译 lib/ + 构建原生辅助进程
 ```
 
-⚠️ **不要**手工往 `~/.dsh/profiles/desktop/cordis.patch.yml` 里加插件行 —— 那条路
-不可能生效（profile 层的插件行按包名从 profile 的 `node_modules` 解析，而包还没被安装），
-而且 `desktop` profile 由桌面应用独占管理，CLI 会直接拒绝操作它。
-完整解释见 [scripts/mount-patch.md](scripts/mount-patch.md)。
+然后在插件管理器里填入**本仓库根目录的绝对路径**。
 
-**装完先看这一个文件**，它是排查「插件没反应」最便宜的一步：
+⚠️ 从源码构建**需要完整 Xcode.app**（不是 Command Line Tools）——辅助进程依赖
+DynamicNotchKit，而它是 SwiftUI 包，编译需要只随 Xcode 分发的 `SwiftUIMacros` 宏插件。
+只用压缩包安装则没有这个要求。
+
+### 装完确认一下
+
+`apply()` 成功执行时做的第一件事就是写一个标记文件：
 
 ```sh
 cat "$HOME/Library/Application Support/dsh-island/plugin-applied.json"
 ```
 
-`apply()` 的第一件事就是写它。文件不存在 ⇒ 问题在加载层，不必怀疑 socket / helper / 渲染。
+文件不存在 ⇒ 问题在**加载层**，不必去怀疑 socket 或渲染。
+这是排查「插件没反应」最便宜的一步。
 
-### 关于 Xcode
+## 使用方法
 
-Swift 辅助进程依赖 DynamicNotchKit，而它是 SwiftUI 包——编译需要 `SwiftUIMacros`
-宏插件，该插件**只随完整 Xcode.app 分发**，Command Line Tools 里没有。
+**不需要任何操作。** 发一条消息、开始一个任务，灵动岛就会自己出现。
 
-```sh
-# 确认 Xcode 已就位
-ls -d /Applications/Xcode.app && \
-  sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
-```
+### 进度是怎么算出来的
 
-`xcode-select --install` **不能**装 Xcode，它只装 Command Line Tools。
-
-### 没有 Xcode 时的行为
-
-辅助进程二进制不存在时，插件**仍会正常加载**，只是不会显示灵动岛，日志中会给出明确原因：
-
-```
-island: helper not reachable at <socket> (binary: <path>).
-Progress will not be displayed. Build it with the Swift layer, or set helperPath.
-```
-
-这是刻意的降级设计：缺一个可选的 UI 组件不该影响 DSH 其余功能。
-
-## 进度语义
-
-| 阶段 | 来源 | 上限 |
+| 阶段 | 来源 | 显示上限 |
 |---|---|---|
-| 估算 | `turn/start` 起 5%，`step/end` 递推 | **硬上限 90%** |
-| 精确 | `todo/write` 的加权比例；或 `report_progress` 工具 | 100% |
+| 估算 | 回合开始为 5%，每个步骤结束后递推 | 90% |
+| 精确（自动） | DSH 的待办清单比例 | 90% |
+| 精确（显式） | 模型调用 `report_progress` 工具 | 100% |
 
-- **估算永不越过 90%**：把 90→100 留给真实终态，使估算层在结构上无法"谎称完成"。
-- **显示值单调不减**。唯一例外是正常完成时跳到 100%。
-- **状态机单向**：进入精确模式后不再回落到估算，避免双数据源抖动。
-- **异常终态不显示 100%**：`aborted` / `error` / `interrupted` / `max-tokens` / `blocked`
-  显示当前值加失败标记，而不是 100%。把中断显示成完成是明确误导。
+**关于 90% 与 100%**——这两个数字有严格区分，值得记一下：
 
-### 两种精确来源
-
-1. **`todo/write`（自动）** —— 事件携带整表替换的待办列表，因此比例天然可信。
-   公式为 `(completed + 0.5 × in_progress) / total`，而不是 `completed / total`：
-   后者的全部信息是"尚无一项完成"，无法区分"刚开始"与"马上做完第一项"，
-   会在模型满负荷工作时显示 0%。一旦有项完成，两个公式结果一致。
-
-2. **`report_progress`（显式）** —— 工具由 `systemPrompt` 段落引导，
-   仅在你确知更准的完成度、或单个长步骤会让进度停滞时才应调用。
-
-## ⚠️ 无刘海机型的行为差异
-
-DynamicNotchKit 在无刘海的 Mac 上使用 `.floating` 样式，而该库的 compact 路径在
-floating 样式下会直接隐藏窗口（源码 `_compact()` 中的
-`if effectiveStyle(for: screen).isFloating { await hide(); return }`）。
-
-因此：
-
-| 机型 | 行为 |
+| 显示 | 含义 |
 |---|---|
-| 有刘海（如 MacBook Pro 14/16） | 刘海中常驻百分比药丸，hover 展开详情，移开收起 |
-| **无刘海** | **无法常驻药丸**，降级为 hover 展开的浮层；**移开不会收起**，浮层保持展开直到任务结束收起 |
+| **90%** | 待办清单已勾完，**但回合还没结束**（可能仍在收尾）。不要派下一个任务。 |
+| **100%** | 回合真的结束了，灵动岛随即收起。**这才是可以派下一个任务的时刻。** |
 
-无刘海机型上「移开不收」是刻意的：库的 floating 样式下 `compact()` 等于隐藏窗口，
-所以插件在无刘海屏上**忽略** hover 移出事件（见 `NotchPresenter.hoverChanged`）。
-代价是一个常驻的浮层，好过一个鼠标移开就消失的进度条。
+也就是说，闪烁的百分比**不是**"要不要继续等"的信号，**灵动岛收起**才是。
 
-这是 DynamicNotchKit 的固有限制，不是本插件的缺陷。
+### 悬停看当前任务
+
+把鼠标停在灵动岛上，面板会展开并显示一行「当前任务」，内容按以下优先级取：
+
+1. 待办清单里**正在进行**的那一项（模型自己写的任务名，最准确）
+2. 否则取当前正在调用的工具，例如：
+
+| 工具 | 显示 |
+|---|---|
+| Bash（带描述） | `运行测试` |
+| Bash（只有命令） | `执行命令：pnpm test` |
+| 读/写/改文件 | `查看文件：src/a.ts` |
+| 搜索 | `搜索内容：TODO` |
+| 联网 | `搜索网页：…` / `抓取网页：…` |
+
+多个待办同时标记为进行中时，取第一个。
+
+### 什么时候会消失
+
+- **正常结束**：显示 100% 后停留约 1.2 秒，然后收起
+- **异常结束**（中断 / 报错）：显示失败标记，停留后收起——**不会**显示 100%
+- **长时间无事件**：默认 120 秒没有任何更新就收起（可配置）
+- **停在 5% 不动**：这通常是正常的。回合刚开始时是 5%，而估算只在**步骤结束**时推进。
+  等待你输入、或模型长时间思考期间，5% 就是预期显示。
 
 ## 配置
 
-在 profile 的 `cordis.patch.yml` 中通过 `config` 传入。**注意 patch 是整行替换
-`config` 而非深度合并**——覆盖任一项时必须把所有想保留的键一并写出。
+在 profile 的 `cordis.patch.yml` 里通过 `config` 传入。
+
+⚠️ **patch 是整行替换 `config` 而非深度合并**——覆盖任一项时必须把所有想保留的键一并写出。
 
 | 键 | 默认值 | 说明 |
 |---|---|---|
 | `socketPath` | `~/Library/Application Support/dsh-island/island.sock` | 目录会被设为 `0700` |
-| `helperPath` | `<包目录>/bin/DynamicIslandBridge` | 辅助进程可执行文件 |
-| `connectTimeoutMs` | `10000` | 等待辅助进程 bind 并连接的时长 |
-| `idleTimeoutMs` | `120000` | 无进度更新多久后自动收起灵动岛 |
+| `helperPath` | `<包目录>/bin/DynamicIslandBridge` | 原生辅助进程 |
+| `connectTimeoutMs` | `10000` | 等待辅助进程就绪的时长 |
+| `idleTimeoutMs` | `120000` | 无更新多久后自动收起 |
 | `graceMs` | `3000` | SIGTERM 后等多久升级为 SIGKILL |
 
-## 通信协议
+## ⚠️ 无刘海机型的行为差异
 
-NDJSON：每行一个 JSON 对象，UTF-8。插件 → 辅助进程方向：
+在**没有**刘海的 Mac 上，DynamicNotchKit 会改用浮动面板样式，而该样式下"收起"等于隐藏窗口。
+因此：
 
-| type | 字段 | 含义 |
-|---|---|---|
-| `hello` | `version` | 连接建立后的握手 |
-| `progress` | `percent`（0..1）、`mode`、`message?` | 更新进度 |
-| `done` | `reason`、`ok` | 终态；`ok:false` 表示异常结束 |
-| `bye` | — | 收起并等待下一次连接 |
+| 机型 | 行为 |
+|---|---|
+| 有刘海（MacBook Pro 14/16 等） | 刘海旁常驻百分比药丸，悬停展开，移开收起 |
+| **无刘海** | **无法常驻药丸**，鼠标移入才展开；**移开不会收起**，一直显示到任务结束 |
 
-接收端必须容忍半包与粘包：帧可能被拆到多次 `read`，也可能一次到达多帧。
+「移开不收」是刻意的：否则鼠标一移开进度条就消失，反而更难用。这是上游库的固有限制。
 
-## 验证阶梯
+## 故障排查
 
-| # | 动作 | 通过判据 |
-|---|---|---|
-| 1 | `npm test` | 全部测试通过 |
-| 2 | `npm run typecheck` | `tsc` 退出码 0 |
-| 3 | 构建辅助进程 | 产出可执行文件 |
-| 4 | `swift test --disable-sandbox --package-path swift/DynamicIslandBridge` | Swift 侧 80 条全绿 |
-| 5 | `node scripts/e2e-real-helper.mjs` | 真插件源码驱动真二进制：窗口出现、优雅退出、无孤儿、空闲超时生效 |
-| 6 | 手工运行辅助进程 | `lsof -U \| grep island.sock` 显示监听 |
-| 7 | 推一条消息 | 见下 |
-| 8 | `dsh --profile desktop --dump-config \| grep -i dynamic-island` | 出现该层 |
-| 9 | 检查 fiber 状态 | **不是 `PENDING`**（inject 服务缺失会静默 PENDING） |
-| 10 | 跑一个真实任务 | 岛在 turn 开始出现、step 递增、结束收起 |
-| 11 | **卸载插件** | `pgrep -f DynamicIslandBridge` 无输出 |
+### 灵动岛不动，或悬停只显示「等待中」
 
-第 7 步：
+按顺序查，每步排除一层：
 
 ```sh
-echo '{"type":"progress","percent":0.42,"mode":"precise"}' | nc -U \
-  "$HOME/Library/Application Support/dsh-island/island.sock"
+# 1. 插件加载了吗（最便宜的一步）
+cat "$HOME/Library/Application Support/dsh-island/plugin-applied.json"
+
+# 2. 辅助进程在跑吗、握着 socket 吗
+lsof -c DynamicIslandBridge | grep island
 ```
 
-第 11 步是唯一能证明清理逻辑正确的测试：
+### 界面完全不动，但进程还在
+
+已知故障：辅助进程**启动即死**。macOS 会因代码签名无效在 exec 时直接杀掉它
+（每次约 16 毫秒），而构建时完全看不出来——症状就是"进程还在、但界面永远不动"。
 
 ```sh
-bash scripts/verify-teardown.sh
+# 判定（期望输出 valid on disk）
+codesign --verify --verbose=2 "<包目录>/bin/DynamicIslandBridge"
+
+# 修复
+codesign --force --sign - --timestamp=none "<包目录>/bin/DynamicIslandBridge"
 ```
 
-⚠️ **不要**用 `bash scripts/verify-teardown.sh DynamicIslandBridge` 当作第 11 步。那条命令跑的是
-**假 helper**（Node 写的 `fake-helper.mjs`），断言 `pgrep` 找不到真二进制属于同义反复；
-更糟的是 `pgrep -f` 会匹配到调用它的那个 shell 自己（命令行里就含这个字符串），
-结论随调用方式而变。真正的第 11 步是第 5 步的 `scripts/e2e-real-helper.mjs`：
-它从 helper 自己打印的启动行里解析 pid，用 `kill(pid, 0)` 判定存活，
-并断言 socket 文件**已被删除**——SIGKILL 路径不可能删除它，所以这一条恰好把
-「优雅 SIGTERM」与「超时升级为 SIGKILL」区分开。
+自己从源码构建的话，`scripts/build-helper.sh` 已经内置这一步，**不要删掉它**。
+
+### 有残留的辅助进程霸占 socket
+
+辅助进程是单客户端的：残留进程持着 socket 时，插件会连到它而新进程不断启动失败。
+残留进程的 pid 通常比当前 DSH 进程更小。
+
+```sh
+lsof -t -c DynamicIslandBridge | xargs -r kill
+```
+
+清掉后插件会在下一次事件时自动拉起新的辅助进程，**不需要重启 DSH**。
+
+## 卸载
+
+在插件管理器里禁用或移除该 bundle。插件会把辅助进程一起停掉，不留残留进程。
 
 ## 开发
 
-```sh
-npm test          # node --test，Node 24 原生跑 .ts，无需构建
-npm run typecheck # 仅类型检查（noEmit）
-```
-
-开发时可以用 Node 写的假辅助进程替代 Swift 版本（真 Unix socket server，
-同样遵循 NDJSON 契约）：
+架构说明、构建细节、验证阶梯、通信协议等面向贡献者的内容在
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)；发布流程见 [docs/PUBLISHING.md](docs/PUBLISHING.md)。
 
 ```sh
-node scripts/fake-helper.mjs /tmp/island-dev.sock
+npm test           # Node 原生跑 TypeScript，无需构建
+npm run typecheck
+npm run build      # 编译 lib/ + 构建并签名 universal 辅助进程
 ```
 
-它的诊断输出走 **stderr**（不是 stdout）：插件 spawn 辅助进程时刻意把 stdout 设为
-`ignore`——未被排空的 stdout 管道会在写满后阻塞辅助进程，导致进度静默冻结。
-所以任何写到 stdout 的内容都会被丢弃。
+## 许可证与致谢
 
-然后用 `--patch` overlay 把 `config.socketPath` 指到该路径即可端到端联调。
+- 本插件基于 MIT 许可证，见 [LICENSE](LICENSE)
+- 灵动岛渲染依赖 [DynamicNotchKit](https://github.com/MoonShotApp/DynamicNotchKit)（MIT）
+- 第三方组件与商标说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
 
-## 许可证
-
-插件本体未指定许可证。DynamicNotchKit 为 MIT。
+> 包内包含 DeepSeek 的鲸鱼标识，仅为标识任务来源；本项目与 DeepSeek 官方无隶属关系。

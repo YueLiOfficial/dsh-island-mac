@@ -141,11 +141,22 @@ fi
   || { tail -25 /tmp/island-pack-install.log; fail "安装失败（完整日志：/tmp/island-pack-install.log）"; }
 ok "装好了"
 
-grep -q "$(node -e "console.log(require('./package.json').name)")" "$PROFILE_DIR/package.json" \
+# Read the name from package.json rather than hardcoding it: a literal here used
+# to assert the OLD name after a rename, so a correctly packed bundle failed.
+PKG_NAME="$(node -e "console.log(require('./package.json').name)")"
+
+grep -q "\"$PKG_NAME\"" "$PROFILE_DIR/package.json" \
   || fail "profile 的 package.json 里没登记这个包"
 ok "profile 的 dependencies 里登记了它"
 
-grep -q "dynamic-island-progress" "$PROFILE_DIR/package.json" \
+# The two checks are different on purpose: `dependencies` is what pnpm installs,
+# `dsh.profile.bundles` is what makes the layer get APPLIED. A package present in
+# only the former loads nothing and reports no error anywhere.
+node -e "
+const p = require(process.argv[1]);
+const bundles = (p.dsh && p.dsh.profile && p.dsh.profile.bundles) || [];
+process.exit(bundles.includes(process.argv[2]) ? 0 : 1);
+" "$PROFILE_DIR/package.json" "$PKG_NAME" \
   || fail "profile 的 dsh.profile.bundles 里没有它 —— 层不会被应用"
 ok "dsh.profile.bundles 里登记了它"
 
