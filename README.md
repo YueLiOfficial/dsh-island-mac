@@ -152,10 +152,10 @@ cat "$HOME/Library/Application Support/dsh-island/plugin-applied.json"
 按顺序查，每步排除一层：
 
 ```sh
-# 1. 插件加载了吗（最便宜的一步）
+# 1. 查看插件是否加载
 cat "$HOME/Library/Application Support/dsh-island/plugin-applied.json"
 
-# 2. 辅助进程在跑吗、握着 socket 吗
+# 2. 查看辅助进程是否启动
 lsof -c DynamicIslandBridge | grep island
 ```
 
@@ -191,8 +191,8 @@ lsof -t -c DynamicIslandBridge | xargs -r kill
 
 ## 开发
 
-架构说明、构建细节、验证阶梯、通信协议等面向贡献者的内容在
-[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)；发布流程见 [docs/PUBLISHING.md](docs/PUBLISHING.md)。
+架构说明、构建细节、验证阶梯、通信协议等面向贡献者的内容记录在维护者本地的
+`docs/DEVELOPMENT.md`（该目录不随仓库分发）。
 
 ```sh
 npm test           # Node 原生跑 TypeScript，无需构建
