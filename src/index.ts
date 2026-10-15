@@ -6,7 +6,12 @@ import type { Context } from '@deepseek-ai/cordis'
 // Importing this module is what makes `ctx.on('session/event', ...)` well-typed:
 // dsh-session declaration-merges that event (and its `(session, event)`
 // signature) into cordis' `Events` interface.
-import '@deepseek-ai/dsh-session'
+//
+// Written as `import type {}` rather than a bare side-effect import on purpose:
+// the augmentation is needed only by the type checker, while a bare import
+// survives into the published JavaScript as a real runtime dependency on a package
+// this bundle does not ship. Type-only, it is erased at emit.
+import type {} from '@deepseek-ai/dsh-session'
 import Schema from '@deepseek-ai/schemastery'
 import { ProgressMachine, type ProgressSnapshot } from './progress.ts'
 import { reduceSessionEvent } from './events.ts'

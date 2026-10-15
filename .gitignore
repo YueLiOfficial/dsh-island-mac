@@ -5,6 +5,8 @@ node_modules/
 .swift-cache/
 .build/
 bin/
+lib/
 swift/*/.build/
 .DS_Store
 .superpowers/
+*.tgz

@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, existsSync, rmSync, chmodSync } from 'node:fs'
+import { mkdtempSync, existsSync, rmSync, chmodSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -100,6 +100,57 @@ test('连接成功后 socket 文件存在且权限不含 group/other 写', async
   const h = await startHelper({ helperPath: process.execPath, helperArgs: [FAKE, s.sock], socketPath: s.sock, connectTimeoutMs: 8000, graceMs: 2000 })
   try {
     assert.ok(existsSync(s.sock), 'socket 文件未创建')
+  } finally {
+    await h.dispose()
+    s.cleanup()
+  }
+})
+
+test('helper 缺少可执行位时（pnpm pack 会丢掉它）插件在 spawn 前补回来', async () => {
+  // `npm pack` 保留文件的 0755，`pnpm pack`（以及 `pnpm publish`）写成 0644。
+  // 从这种 tarball 装出来的 helper 会以 EACCES 启动失败，症状与「二进制不存在」
+  // 完全一样——插件日志只会说 helper not reachable。所以插件自己补这一位。
+  const s = scratch()
+  const shim = join(s.dir, 'helper.sh')
+  writeFileSync(shim, `#!/bin/sh\nexec "${process.execPath}" "${FAKE}" "$@"\n`)
+  chmodSync(shim, 0o644)
+  assert.equal(statSync(shim).mode & 0o111, 0, '前提：起点确实没有可执行位')
+
+  const h = await startHelper({
+    helperPath: shim,
+    // startHelper 不会追加 socket 路径（那是 supervisor 的职责），所以这里显式传。
+    helperArgs: [s.sock],
+    socketPath: s.sock,
+    connectTimeoutMs: 8000,
+    graceMs: 2000,
+  })
+  try {
+    assert.notEqual(h.sender, null, 'helper 因为缺少可执行位而没能启动')
+    assert.notEqual(statSync(shim).mode & 0o100, 0, '插件应在 spawn 之前补上可执行位')
+  } finally {
+    await h.dispose()
+    s.cleanup()
+  }
+})
+
+test('已经可执行的 helper 不被改动权限', async () => {
+  // 补位的实现必须先看权限位再 chmod：无脑 chmod 会去改 /usr/bin/node 这类
+  // 别人的文件（测试里 helperPath 常常就是它）。
+  const s = scratch()
+  const shim = join(s.dir, 'helper.sh')
+  writeFileSync(shim, `#!/bin/sh\nexec "${process.execPath}" "${FAKE}" "$@"\n`)
+  chmodSync(shim, 0o744)
+  const before = statSync(shim).mode
+
+  const h = await startHelper({
+    helperPath: shim,
+    helperArgs: [s.sock],
+    socketPath: s.sock,
+    connectTimeoutMs: 8000,
+    graceMs: 2000,
+  })
+  try {
+    assert.equal(statSync(shim).mode, before, '已经可执行的文件不该被改权限')
   } finally {
     await h.dispose()
     s.cleanup()

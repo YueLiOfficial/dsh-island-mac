@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process'
-import { chmodSync, mkdirSync } from 'node:fs'
+import { chmodSync, mkdirSync, statSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { connectLineSender, type LineSender } from './transport.ts'
 
@@ -117,6 +117,24 @@ export async function startHelper(opts: HelperOptions): Promise<HelperHandle> {
     chmodSync(dir, 0o700)
   } catch {
     // Best effort; a failure here surfaces later as a connect failure.
+  }
+
+  // npm-family packers disagree about the executable bit: `npm pack` keeps 0755,
+  // but `pnpm pack` — and therefore `pnpm publish` — writes 0644. A helper
+  // installed from such a tarball fails to spawn with EACCES, which reads exactly
+  // like a missing binary ("helper not reachable"), so restore the bit here.
+  //
+  // Checked before chmod on purpose: `helperPath` is often a shared interpreter
+  // (tests spawn `process.execPath`), and blindly chmod-ing another user's file
+  // either fails or, as root, changes it.
+  try {
+    const mode = statSync(opts.helperPath).mode
+    if ((mode & 0o100) === 0) {
+      chmodSync(opts.helperPath, mode | 0o755)
+    }
+  } catch {
+    // ENOENT is the documented degraded state — the Swift layer has not been
+    // built. The spawn below reports it with the caller's own wording.
   }
 
   // spawn can throw SYNCHRONOUSLY (e.g. ERR_INVALID_ARG_VALUE for an empty or

@@ -1,17 +1,48 @@
 {
   "name": "dsh-dynamic-island-progress",
   "version": "0.1.0",
+  "description": "在 macOS 刘海/灵动岛区域显示当前 dsh 任务的完成百分比",
+  "license": "MIT",
   "type": "module",
-  "main": "src/index.ts",
-  "files": ["src", "cordis.patch.yml", "bin"],
+  "main": "lib/index.js",
+  "os": [
+    "darwin"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "bundle",
+    "macos",
+    "notch",
+    "dynamic-island"
+  ],
+  "files": [
+    "lib",
+    "src",
+    "cordis.patch.yml",
+    "bin",
+    "THIRD_PARTY_NOTICES.md"
+  ],
   "scripts": {
     "test": "node --test 'test/**/*.test.ts'",
-    "typecheck": "tsc -p tsconfig.json"
+    "typecheck": "tsc -p tsconfig.json",
+    "build": "bash scripts/build-bundle.sh",
+    "prepack": "bash scripts/build-bundle.sh",
+    "verify:package": "bash scripts/verify-packed-tarball.sh"
   },
-  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.4",
-    "@deepseek-ai/dsh-tools": "*"
+    "@deepseek-ai/dsh-tools": "*",
+    "@deepseek-ai/schemastery": "^3.18.4"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.4",

@@ -1,0 +1,25 @@
+{
+  // Build config: emits runnable JavaScript for the published package.
+  //
+  // Why this exists at all: Node refuses to strip TypeScript types for files under
+  // `node_modules` (`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`), so an installed
+  // bundle whose `main` points at `src/index.ts` fails to import with
+  // "failed to import" — while the very same file loads fine from a linked
+  // checkout, where it is not under node_modules. Shipping built JS is therefore
+  // not an optimisation, it is the only thing that works for other people.
+  //
+  // `rewriteRelativeImportExtensions` keeps the source's explicit `./x.ts`
+  // specifiers (which Node needs to resolve the dev-time `.ts` files) and rewrites
+  // them to `./x.js` in the emitted output, so one source tree serves both
+  // `node --test` on TypeScript and the published JavaScript.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rootDir": "src",
+    "outDir": "lib",
+    "rewriteRelativeImportExtensions": true,
+    "declaration": false,
+    "sourceMap": false
+  },
+  "include": ["src/**/*.ts"]
+}

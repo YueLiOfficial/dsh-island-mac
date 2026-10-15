@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # Build the Swift helper into bin/DynamicIslandBridge.
 #
-# Three toolchain facts this script exists to encode (all verified on this
+# Builds BOTH architectures by default: the artifact this produces is what gets
+# packaged and handed to other people, so "I forgot the universal flag" must not be
+# a way to ship an Apple-Silicon-only plugin. Pass --native for a fast local loop.
+#
+# Four toolchain facts this script exists to encode (all verified on this
 # machine; see the Swift plan for the full write-up):
 #
 #  1. DynamicNotchKit is a SwiftUI package and needs the SwiftUIMacros plugin,
@@ -10,6 +14,8 @@
 #     `sandbox-exec`, so --disable-sandbox is required. It is harmless outside.
 #  3. SwiftPM writes caches under $HOME, which may be read-only in a sandbox;
 #     redirect them into the repository.
+#  4. The install must be a rename, not a copy over the destination — see the
+#     comment at the install step.
 #
 # Unlike the TS side, building this needs SwiftPM — do NOT try to validate the
 # macros with a bare `swiftc` invocation. SwiftPM passes each macro plugin via
@@ -20,6 +26,25 @@ cd "$(dirname "$0")/.."
 
 PACKAGE="swift/DynamicIslandBridge"
 OUT="bin/DynamicIslandBridge"
+MINIMUM_MACOS="13.0"
+
+UNIVERSAL=1
+for argument in "$@"; do
+  case "$argument" in
+    --native) UNIVERSAL=0 ;;
+    --universal) UNIVERSAL=1 ;;
+    -h|--help)
+      echo "用法: $(basename "$0") [--native|--universal]"
+      echo "  --universal  arm64 + x86_64（默认，发布用）"
+      echo "  --native     只编译本机架构（本地迭代更快）"
+      exit 0
+      ;;
+    *)
+      echo "✖ 未知参数：$argument" >&2
+      exit 1
+      ;;
+  esac
+done
 
 if [ ! -d "$PACKAGE" ]; then
   echo "✖ 未找到 Swift 包：$PACKAGE" >&2
@@ -58,14 +83,51 @@ SWIFTPM_CACHE_ARGS=(
   --security-path "$PWD/.swift-cache/security"
 )
 
-echo "==> swift build -c release"
-swift build -c release --disable-sandbox --package-path "$PACKAGE" "${SWIFTPM_CACHE_ARGS[@]}"
+ARCH_ARGS=()
+ARCH_LABEL="native"
+if [ "$UNIVERSAL" -eq 1 ]; then
+  ARCH_ARGS=(--arch arm64 --arch x86_64)
+  ARCH_LABEL="arm64+x86_64"
+fi
 
-BUILT="$(swift build -c release --disable-sandbox --package-path "$PACKAGE" "${SWIFTPM_CACHE_ARGS[@]}" --show-bin-path)/DynamicIslandBridge"
+echo "==> swift build -c release ($ARCH_LABEL)"
+swift build -c release --disable-sandbox --package-path "$PACKAGE" \
+  "${ARCH_ARGS[@]}" "${SWIFTPM_CACHE_ARGS[@]}"
+
+BUILT="$(swift build -c release --disable-sandbox --package-path "$PACKAGE" \
+  "${ARCH_ARGS[@]}" "${SWIFTPM_CACHE_ARGS[@]}" --show-bin-path)/DynamicIslandBridge"
 if [ ! -x "$BUILT" ]; then
   echo "✖ 构建完成但未找到可执行文件：$BUILT" >&2
   exit 1
 fi
+
+# Verify what was built before installing it, so a wrong-architecture or
+# wrong-deployment-target artifact can never reach bin/ unnoticed.
+SLICES="$(lipo -archs "$BUILT" 2>/dev/null || echo unknown)"
+echo "==> 架构: $SLICES"
+if [ "$UNIVERSAL" -eq 1 ]; then
+  case "$SLICES" in
+    *arm64*x86_64*|*x86_64*arm64*) ;;
+    *)
+      echo "✖ 期望 universal 二进制（arm64 + x86_64），实际：$SLICES" >&2
+      exit 1
+      ;;
+  esac
+fi
+
+for arch in $SLICES; do
+  minos="$(vtool -arch "$arch" -show-build "$BUILT" 2>/dev/null | awk '/minos/ {print $2; exit}')"
+  if [ -z "${minos}" ]; then
+    echo "✖ 读不出 $arch 的 minos（最低 macOS 版本）" >&2
+    exit 1
+  fi
+  if [ "${minos}" != "${MINIMUM_MACOS}" ]; then
+    echo "✖ $arch 的 minos 是 ${minos}，期望 ${MINIMUM_MACOS}（Package.swift 的 platforms）" >&2
+    echo "  比预期更高的 minos 会让旧 macOS 直接拒绝启动这个 helper。" >&2
+    exit 1
+  fi
+  echo "==> $arch minos: ${minos}"
+done
 
 mkdir -p "$(dirname "$OUT")"
 
