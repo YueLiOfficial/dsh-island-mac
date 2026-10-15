@@ -44,22 +44,62 @@ try {
   bad(`加载失败: ${e.code ?? ''} ${(e.message ?? '').split('\n')[0]}`)
 }
 
-console.log('\n== 2. profile 挂载条目 ==')
-if (!existsSync(PATCH)) {
-  bad(`找不到 ${PATCH}`)
+console.log('\n== 2. profile 是否登记为 bundle ==')
+// A bundle is applied via TWO independent registrations, and checking only one
+// of them gives a confidently wrong answer:
+//   - `dependencies`      → what pnpm installs into the profile's node_modules
+//   - `dsh.profile.bundles` → what makes the layer get APPLIED
+// A package listed only in the former installs cleanly and then does nothing,
+// with no error anywhere.
+//
+// The profile's own `cordis.patch.yml` is NOT where this belongs: a bundle's
+// patch comes from inside the package (`package.json` → `dsh.bundle.patch`),
+// so this script used to demand `id: dynamic-island` in a file that is only
+// meant for user overrides — failing a perfectly good install.
+const profilePkg = join(PROFILE, 'package.json')
+if (!existsSync(profilePkg)) {
+  bad(`找不到 ${profilePkg}`)
 } else {
+  const p = JSON.parse(readFileSync(profilePkg, 'utf8'))
+  const deps = p.dependencies ?? {}
+  const bundles = p.dsh?.profile?.bundles ?? []
+
+  if (Object.prototype.hasOwnProperty.call(deps, PKG)) {
+    ok(`dependencies 里登记了 ${PKG}`)
+    const spec = String(deps[PKG])
+    const installed = join(PROFILE, 'node_modules', PKG)
+    if (spec.startsWith('link:') || spec.startsWith('file:')) {
+      ok('是本地链接安装 —— 仓库改动会立刻生效')
+    } else if (existsSync(installed)) {
+      // Distinguish the two, because the difference decides whether editing the
+      // repo changes anything: an npm install is a frozen copy.
+      ok(`按版本安装（${spec}）—— 注意：这是已发布的快照，仓库改动不会生效`)
+    } else {
+      bad(`dependencies 里有 ${PKG}，但 node_modules 下没有它 —— 需要重新安装`)
+    }
+  } else {
+    bad(`dependencies 里没有 ${PKG} —— 插件管理器里的「添加」还没做？`)
+  }
+
+  if (bundles.includes(PKG)) ok(`dsh.profile.bundles 里登记了 ${PKG}（层会被应用）`)
+  else bad(`dsh.profile.bundles 里没有 ${PKG} —— 包会装上但这一层不会被应用`)
+
+  for (const key of Object.keys(deps)) {
+    if (key !== PKG && key.startsWith('dsh-') && key.includes('island')) {
+      bad(`dependencies 里仍有旧包名 ${key} —— 建议在插件管理器里移除`)
+    }
+  }
+}
+
+// Optional overrides DO live in the profile patch. Reported, never required.
+if (existsSync(PATCH)) {
   const text = readFileSync(PATCH, 'utf8')
-  // The layer id is what the bundle's own cordis.patch.yml inserts with; the
-  // package name is what a `name:`-style entry would use. Accept either, since
-  // both are observed in the wild depending on how the plugin was mounted.
-  if (!text.includes('dynamic-island') && !text.includes(PKG)) bad('patch 里没有本插件条目')
-  else ok('patch 里有本插件条目')
   const usesBareName = PKG_RE.test(text)
   const usesPath = text.includes(ENTRY)
-  if (usesPath) ok('使用绝对路径引用（可解析）')
+  if (usesPath) ok('profile patch 用绝对路径覆盖（可解析）')
   else if (usesBareName) {
-    bad('使用裸包名，但它没有安装进 profile 的 node_modules —— 这一层会加载失败')
-    console.log(`     改成绝对路径即可：`)
+    bad('profile patch 用裸包名覆盖，但它没安装进 profile 的 node_modules —— 该行会被静默丢弃')
+    console.log(`     改成绝对路径：`)
     console.log(`       name: "${ENTRY}"`)
   }
 }

@@ -104,13 +104,23 @@ function normaliseName(name: string): string {
 }
 
 /**
- * Parses the raw `arguments` JSON string of a `tool/call`.
+ * Normalizes tool arguments into an object.
  *
- * Returns null for anything that is not a JSON object — including valid JSON
- * that is not an object (`null`, arrays, bare strings), which is the shape a
- * model occasionally emits. Never throws.
+ * Accepts BOTH shapes on purpose, because the two event sources disagree:
+ *
+ * - `session/event`'s `tool/call` carries `arguments` as the model's **raw,
+ *   unparsed JSON string**.
+ * - Cordis `tools/pre-execute` carries `exec.arguments` as an **already-parsed
+ *   object** (proved by `preToolPayload` embedding it directly as `tool_input`;
+ *   a string there would be double-encoded).
+ *
+ * Accepting only one shape would not fail loudly — every label would silently
+ * degrade to its generic form. Returns null for anything that is not an object,
+ * including valid JSON that is not one (arrays, bare strings), which is a shape
+ * models do occasionally emit. Never throws.
  */
-function parseArguments(raw: string | undefined): Record<string, unknown> | null {
+function parseArguments(raw: unknown): Record<string, unknown> | null {
+  if (isRecord(raw)) return raw
   if (typeof raw !== 'string' || raw.trim().length === 0) return null
   try {
     const parsed: unknown = JSON.parse(raw)
@@ -134,15 +144,16 @@ function pick(args: Record<string, unknown> | null, keys: readonly string[]): st
  * A readable label for the tool call currently executing, used only when no
  * in-progress todo supplies a better answer.
  *
- * `name` is the tool name as the model invoked it and `rawArguments` is its
- * unparsed `arguments` JSON string, exactly as `tool/call` carries them.
+ * `name` is the tool name as the model invoked it. `rawArguments` may be either
+ * the raw JSON string (`tool/call`) or an already-parsed object
+ * (`tools/pre-execute`) — see `parseArguments`.
  */
 export function currentTaskFromToolCall(name: unknown, rawArguments: unknown): string | null {
   if (typeof name !== 'string') return null
   const trimmedName = name.trim()
   if (trimmedName.length === 0) return null
 
-  const args = parseArguments(typeof rawArguments === 'string' ? rawArguments : undefined)
+  const args = parseArguments(rawArguments)
   const normalised = normaliseName(trimmedName)
 
   // An empty prefix means "the value IS the label" — joining on `：` there would

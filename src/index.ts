@@ -15,6 +15,12 @@ import type {} from '@deepseek-ai/dsh-session'
 import Schema from '@deepseek-ai/schemastery'
 import { ProgressMachine, type ProgressSnapshot } from './progress.ts'
 import { reduceSessionEvent } from './events.ts'
+import {
+  reduceActivityEvent,
+  onToolPreExecute,
+  onToolPostExecute,
+  type ToolExecLike,
+} from './activity.ts'
 import { encodeMessage, PROTOCOL_VERSION, type OutboundMessage } from './protocol.ts'
 import { HelperSupervisor } from './supervisor.ts'
 import type { LineSender } from './transport.ts'
@@ -50,6 +56,33 @@ export const Config: Schema<Config> = Schema.object({
 declare module '@deepseek-ai/cordis' {
   interface Context {
     islandProgress: IslandProgressService
+  }
+}
+
+/**
+ * The subagent lifecycle events this plugin listens to.
+ *
+ * Declared here because **no installed package declares them**: they are
+ * dispatched at runtime (verified in the shipped bundle, where the subagent
+ * service emits `subagent/start` / `subagent/end`), but they are absent from
+ * `@deepseek-ai/cordis`'s `Events` and from every `.d.ts` in the dependency
+ * tree. Cordis' documented extension mechanism for exactly this is declaration
+ * merging, which is what this block does — the same technique `dsh-tool-todo`
+ * uses to add `todo/write` to `SessionEventMap`.
+ *
+ * `info` is typed structurally on the two fields actually read. If a future
+ * release declares these events with the same shape, the declarations merge;
+ * a different shape would surface as a type error here, which is the desired
+ * outcome rather than silently reading the wrong field.
+ */
+declare module '@deepseek-ai/cordis' {
+  interface Events {
+    'subagent/start'(info: { readonly runId?: string; readonly id?: string }): void
+    'subagent/end'(info: {
+      readonly runId?: string
+      readonly id?: string
+      readonly stopReason?: string
+    }): void
   }
 }
 
@@ -140,6 +173,37 @@ export function apply(ctx: Context, config: Config): void {
   let pending: ProgressSnapshot | null = null
   let flushing = false
 
+  /**
+   * Minimum gap between socket writes, in ms.
+   *
+   * `tools/pre-execute` fires for EVERY tool call — measured at ~10/s during a
+   * busy burst — and each frame is a JSON serialization plus a socket write. The
+   * in-tick coalescing below merges events sharing a tick but does nothing across
+   * ticks, so without this the island would be flooded. 200ms keeps the label
+   * change well inside human perception while bounding the write rate to 5/s.
+   */
+  const MIN_FLUSH_INTERVAL_MS = 200
+  let lastFlushAt = 0
+  let throttleTimer: ReturnType<typeof setTimeout> | null = null
+
+  /** Schedules `flush` no sooner than `MIN_FLUSH_INTERVAL_MS` after the last one. */
+  const scheduleFlush = (): void => {
+    if (disposed) return
+    if (flushing || throttleTimer !== null) return
+
+    const elapsed = Date.now() - lastFlushAt
+    const wait = Math.max(0, MIN_FLUSH_INTERVAL_MS - elapsed)
+
+    flushing = true
+    throttleTimer = setTimeout(() => {
+      throttleTimer = null
+      flushing = false
+      lastFlushAt = Date.now()
+      flush()
+    }, wait)
+    ;(throttleTimer as { unref?: () => void }).unref?.()
+  }
+
   const flush = (): void => {
     if (pending === null || disposed) return
     const snapshot = pending
@@ -163,15 +227,6 @@ export function apply(ctx: Context, config: Config): void {
       ...(snapshot.message === undefined ? {} : { message: snapshot.message }),
       ...(snapshot.currentTask === undefined ? {} : { task: snapshot.currentTask }),
     })
-  }
-
-  const scheduleFlush = (): void => {
-    if (flushing) return
-    flushing = true
-    setTimeout(() => {
-      flushing = false
-      flush()
-    }, 0)
   }
 
   const send = (message: OutboundMessage): void => {
@@ -214,6 +269,15 @@ export function apply(ctx: Context, config: Config): void {
   const bumpIdle = (): void => {
     clearIdleTimer()
     idleTimer = setTimeout(() => {
+      // A running agent means work is genuinely in progress, so silence is
+      // expected rather than abandonment. This is what keeps the island up
+      // through a long tool call — and, once approvals land, through a wait for
+      // a human decision. Without it the bar vanished mid-task at exactly the
+      // moment the user was being asked to act.
+      if (machine.snapshot().agentRunning) {
+        bumpIdle()
+        return
+      }
       // Nothing happened for a while: collapse the island rather than leaving
       // a stale bar on screen.
       send({ type: 'bye' })
@@ -269,6 +333,75 @@ export function apply(ctx: Context, config: Config): void {
     pending = result.snapshot
     scheduleFlush()
   })
+
+  // --- Activity events -----------------------------------------------------
+  // Two buses, two shapes. `session/created` and friends are Cordis events whose
+  // payload differs per event; the two `tools/*` are middleware chains.
+
+  /** Applies an activity reducer's verdict. */
+  const applyActivity = (result: { changed: boolean; snapshot: ProgressSnapshot; activity?: boolean }): void => {
+    // Liveness alone is worth a frame: it is what keeps the island visible
+    // through a long silent tool call.
+    if (!result.changed && result.activity !== true) return
+    pending = result.snapshot
+    scheduleFlush()
+  }
+
+  for (const type of [
+    'session/created',
+    'session/disposed',
+    'agent/status',
+    'subagent/start',
+    'subagent/end',
+  ] as const) {
+    ctx.on(type, (...args: unknown[]) => {
+      if (disposed) return
+      applyActivity(reduceActivityEvent(machine, type, args[0]))
+    })
+  }
+
+  /**
+   * `tools/pre-execute` is a MIDDLEWARE, not a notification: the harness's own
+   * consumers return `{ kind: 'deny' | 'ask' }` to interfere, composing around a
+   * `next` continuation.
+   *
+   * This plugin only observes, so it MUST pass through. Returning anything else —
+   * or forgetting `next` — vetoes every tool call in the session, a far worse
+   * outcome than a missing label. Anything thrown while reading the payload is
+   * swallowed for the same reason: a progress indicator must never be able to
+   * block the work it is reporting on.
+   *
+   * The cast is confined to the listener's own signature. `ToolExecution` and
+   * `PreToolDecision` are not re-exported from `@deepseek-ai/dsh-tools`' public
+   * entry (`lib/types/index.d.ts`), so the handler cannot name them; the runtime
+   * fields it reads (`callId` / `name` / `arguments` / `agent`) were verified
+   * against `ToolExecutionInput`. Casting anything wider than this single
+   * registration would hide a real mismatch later.
+   */
+  ctx.on('tools/pre-execute', (async (
+    exec: ToolExecLike,
+    next: () => Promise<never>,
+  ): Promise<never> => {
+    try {
+      if (!disposed) applyActivity(onToolPreExecute(machine, exec))
+    } catch (error) {
+      log.warn('island: pre-execute bookkeeping failed: %s', String(error))
+    }
+    return next()
+  }) as never)
+
+  ctx.on('tools/post-execute', (async (
+    exec: ToolExecLike,
+    _result: unknown,
+    next: () => Promise<never>,
+  ): Promise<never> => {
+    try {
+      if (!disposed) applyActivity(onToolPostExecute(machine, exec))
+    } catch (error) {
+      log.warn('island: post-execute bookkeeping failed: %s', String(error))
+    }
+    return next()
+  }) as never)
 
   // --- Single effect owning the child process ------------------------------
   // All order-dependent teardown lives in ONE async disposer: multiple async

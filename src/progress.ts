@@ -22,6 +22,16 @@ export interface ProgressSnapshot {
    * event stream and changes as work moves on.
    */
   currentTask: string | undefined
+  /**
+   * Whether an agent is currently running, as told by `agent/status`.
+   *
+   * This is the only signal that says "work is alive but nothing is being
+   * emitted" — a long tool call, or waiting on a human. The idle watchdog reads
+   * it so a busy session is not collapsed mid-task (see `src/index.ts`).
+   */
+  agentRunning: boolean
+  /** How many subagents are running right now. Displayed as a suffix. */
+  subagentCount: number
   turn: number | null
   ok: boolean
 }
@@ -39,6 +49,21 @@ const TURN_START_PERCENT = 0.05
  * constant for both keeps the two paths from drifting apart.
  */
 export const ESTIMATE_CEILING = 0.9
+
+/**
+ * Pseudo call id for the todo-derived label.
+ *
+ * It lives in the same in-flight stack as tool labels so both participate in one
+ * priority order, but it has no real `tools/post-execute` to remove it. A
+ * distinctive value guarantees no tool's `callId` can accidentally clear it.
+ */
+const TODO_LABEL_ID = 'todo:in-progress'
+
+/** A tool call that has started but not yet finished. */
+interface InFlightTool {
+  callId: string
+  label: string
+}
 
 /**
  * The single source of truth for displayed progress.
@@ -61,9 +86,23 @@ export class ProgressMachine {
   private percent = 0
   private mode: ProgressMode | null = null
   private message: string | undefined = undefined
-  private currentTask: string | undefined = undefined
   private turn: number | null = null
   private ok = true
+
+  /**
+   * Tool calls that have started and not yet finished, oldest first.
+   *
+   * A list rather than a single label because `tools/post-execute` must fall
+   * back to whatever is *still* running, not blank the line: tools in this
+   * harness run in sequence, but a nested/subagent call can legitimately overlap,
+   * and "the most recently started unfinished tool" is the honest answer either
+   * way. `tools/pre-execute` appends, `tools/post-execute` removes by `callId`.
+   */
+  private inFlight: InFlightTool[] = []
+  /** Subagent run ids currently running, so `end` can match the right `start`. */
+  private subagents: string[] = []
+  /** Set from `agent/status`; read by the idle watchdog, never displayed raw. */
+  private agentRunning = false
 
   /**
    * Begin a new turn. Resets to the 5% floor and clears any precise lock —
@@ -83,27 +122,81 @@ export class ProgressMachine {
     this.percent = TURN_START_PERCENT
     this.mode = 'estimated'
     this.message = undefined
-    // A task label from the previous turn describes work that is over; carrying
-    // it forward would show a stale line until the new turn's first tool call.
-    this.currentTask = undefined
+    // Work from the previous turn is over; carrying any of it forward would show
+    // stale text until the new turn produces its own events.
+    this.inFlight = []
+    this.subagents = []
     this.turn = turn
     this.ok = true
     return this.snapshot()
   }
 
   /**
-   * Records what is happening now, for the hover panel.
+   * Overrides the derived label with a caller-supplied one.
    *
-   * Deliberately does NOT count as progress: a label arrives on events that say
-   * nothing about completion, and treating one as progress would let the
-   * displayed percentage move on no evidence. Callers pair this with whatever
-   * percentage event they are already handling.
+   * Used for the todo-derived label, which is a better answer than any tool name
+   * ("implement hover labels" beats "Edit"). It wins over in-flight tools because
+   * callers only pass it when a todo item is actively `in_progress`.
+   *
+   * Deliberately does NOT touch the percentage: a label arrives on events that
+   * say nothing about completion, and letting one move the bar would make the
+   * displayed value move on no evidence.
    *
    * `undefined` is ignored rather than stored, so a payload with no readable
    * text cannot blank a label that is already showing.
    */
   setCurrentTask(task: string | undefined): ProgressSnapshot {
-    if (task !== undefined && task.length > 0) this.currentTask = task
+    if (task !== undefined && task.length > 0) {
+      // Modelled as an in-flight entry so it participates in the same stack as
+      // tool labels; `toolFinished` never removes this one (unknown callId).
+      this.inFlight = [{ callId: TODO_LABEL_ID, label: task }]
+    }
+    return this.snapshot()
+  }
+
+  /**
+   * `tools/pre-execute` fired: a tool call is starting.
+   *
+   * Re-adding an existing `callId` replaces it in place, so a replayed event
+   * cannot accumulate duplicates.
+   */
+  toolStarted(callId: string, label: string): ProgressSnapshot {
+    this.inFlight = [...this.inFlight.filter((t) => t.callId !== callId), { callId, label }]
+    return this.snapshot()
+  }
+
+  /**
+   * `tools/post-execute` fired: that call is no longer "what is happening".
+   *
+   * An unknown `callId` is a no-op rather than an error — the todo-derived label
+   * is not a real tool and must survive a post-execute that follows it.
+   */
+  toolFinished(callId: string): ProgressSnapshot {
+    const next = this.inFlight.filter((t) => t.callId !== callId)
+    if (next.length !== this.inFlight.length) this.inFlight = next
+    return this.snapshot()
+  }
+
+  /**
+   * `subagent/start` / `subagent/end`. Tracked separately from tools so the two
+   * counts cannot corrupt each other.
+   */
+  subagentStarted(runId: string): ProgressSnapshot {
+    if (!this.subagents.includes(runId)) this.subagents = [...this.subagents, runId]
+    return this.snapshot()
+  }
+
+  subagentFinished(runId: string): ProgressSnapshot {
+    this.subagents = this.subagents.filter((id) => id !== runId)
+    return this.snapshot()
+  }
+
+  /**
+   * `agent/status`. Not displayed; read by the idle watchdog so a long silent
+   * tool call is not mistaken for an abandoned session.
+   */
+  setAgentRunning(running: boolean): ProgressSnapshot {
+    this.agentRunning = running
     return this.snapshot()
   }
 
@@ -159,10 +252,26 @@ export class ProgressMachine {
     this.percent = 0
     this.mode = null
     this.message = undefined
-    this.currentTask = undefined
+    this.inFlight = []
+    this.subagents = []
+    this.agentRunning = false
     this.turn = null
     this.ok = true
     return this.snapshot()
+  }
+
+  /**
+   * The label shown in the hover panel, derived rather than stored.
+   *
+   * Derived so the two sources cannot disagree: whatever is still in flight *is*
+   * the answer, and a subagent count appears only when it is actually news
+   * (more than one). The most recently started unfinished tool wins, which is the
+   * closest a sequential harness gets to "what is happening right now".
+   */
+  private taskLabel(): string | undefined {
+    const base = this.inFlight.length > 0 ? this.inFlight[this.inFlight.length - 1]!.label : undefined
+    if (this.subagents.length <= 1) return base
+    return base === undefined ? `${this.subagents.length} 个子代理运行中` : `${base} · ${this.subagents.length} 子代理`
   }
 
   /** Returns a fresh object so callers cannot mutate internal state. */
@@ -172,7 +281,9 @@ export class ProgressMachine {
       percent: this.percent,
       mode: this.mode,
       message: this.message,
-      currentTask: this.currentTask,
+      currentTask: this.taskLabel(),
+      agentRunning: this.agentRunning,
+      subagentCount: this.subagents.length,
       turn: this.turn,
       ok: this.ok,
     }
