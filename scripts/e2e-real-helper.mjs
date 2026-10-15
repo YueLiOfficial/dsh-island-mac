@@ -64,11 +64,20 @@ function buildProbe() {
 }
 const probeReady = buildProbe()
 
-/** 返回 helper 当前占用的窗口数；探针不可用时返回 null。 */
-function windowCount() {
+/**
+ * 返回匹配的窗口数；探针不可用时返回 null。
+ *
+ * 传入 `pid` 时只统计该进程拥有的窗口。**总是应该传**：一个实际挂载了本插件的
+ * 开发机上，屏幕上永远有另一个 `DynamicIslandBridge` 的岛，按进程名匹配会把它
+ * 一起数进去。这个缺陷实测造成过两种错误：所有「期望 0 个窗口」的断言必然失败，
+ * 而更糟的是「期望窗口消失」的断言会**对着别人的岛通过**——即假阴性。
+ * 探针因此支持按 PID 过滤（见 probe-island-window.swift）。
+ */
+function windowCount(pid = null) {
   if (!probeReady) return null
+  const args = pid === null ? ['DynamicIslandBridge'] : ['DynamicIslandBridge', String(pid)]
   try {
-    const out = execFileSync(probe, ['DynamicIslandBridge'], { encoding: 'utf8' })
+    const out = execFileSync(probe, args, { encoding: 'utf8' })
     return Number(out.match(/MATCHED=(\d+)/)?.[1] ?? 0)
   } catch (error) {
     // 探针在 0 个窗口时以 1 退出。
@@ -80,16 +89,32 @@ function windowCount() {
 
 /** 与窗口数联动：探针不可用时跳过（记一条说明，不算通过）。 */
 let windowChecksUsable = probeReady
-function expectWindow(expected, label) {
+function expectWindow(expected, label, pid = null) {
   if (!windowChecksUsable) {
     // 明确计为「跳过」而不是通过：跳过不等于验证过。
     skipped++
     console.log(`  ·  ${label}：跳过（无窗口探针）`)
     return
   }
-  const count = windowCount()
+  const count = windowCount(pid)
   if (count === expected) ok(`${label}：窗口数 = ${count}`)
   else bad(`${label}：窗口数 = ${count}，期望 ${expected}`)
+}
+
+/**
+ * 从 helper 的 stderr 里解析它自己报出的 pid。
+ *
+ * helper 的启动行是唯一把「这个进程」与「这个 socket」绑起来的证据；拿到 pid 后
+ * 窗口断言才能只针对它，而不是屏幕上任意一个同名进程。
+ */
+async function waitForHelperPid(readStderr, ms = 8_000) {
+  const until = Date.now() + ms
+  while (Date.now() < until) {
+    const match = readStderr().match(/listening on .*pid (\d+)/)
+    if (match) return Number(match[1])
+    await sleep(100)
+  }
+  return null
 }
 
 const mod = await import(new URL(`file://${join(ROOT, 'src', 'index.ts')}`).href)
@@ -164,7 +189,7 @@ else ok('插件没有报「helper not reachable」——connect 成功')
 
 // ---- 2. 注入一次真实 turn，断言窗口真的出现 ----
 console.log('\n== 插件事件 → 真 helper → 真窗口 ==')
-expectWindow(0, 'turn/start 之前')
+expectWindow(0, 'turn/start 之前', pid)
 
 const sessionEvent = listeners.find((l) => l.name === 'session/event')
 if (!sessionEvent) {
@@ -175,7 +200,7 @@ if (!sessionEvent) {
   let appeared = false
   const windowDeadline = Date.now() + 6_000
   while (Date.now() < windowDeadline) {
-    if (windowCount() > 0) { appeared = true; break }
+    if (windowCount(pid) > 0) { appeared = true; break }
     await sleep(200)
   }
   if (!windowChecksUsable) {
@@ -218,7 +243,7 @@ if (pid) {
   bad('没有拿到 pid，无法判定孤儿')
 }
 
-expectWindow(0, 'dispose 之后')
+expectWindow(0, 'dispose 之后', pid)
 
 // ---- 4. 收起动画期间来新一轮：岛必须重新出现 ----
 //
@@ -240,7 +265,8 @@ async function phaseNewTurnDuringHide() {
   console.log('\n== 收起动画期间来新一轮 ==')
   const raceSocket = join(dir, 'race.sock')
   const child = spawn(HELPER, [raceSocket], { stdio: ['ignore', 'ignore', 'pipe'], detached: true })
-  child.stderr.on('data', () => {})
+  let raceStderr = ''
+  child.stderr.on('data', (d) => { raceStderr += d })
 
   const send = (line) => new Promise((resolve, reject) => {
     const socket = createConnection(raceSocket, () => {
@@ -256,16 +282,19 @@ async function phaseNewTurnDuringHide() {
     while (Date.now() < until && !existsSync(raceSocket)) await sleep(100)
     if (!existsSync(raceSocket)) { bad('socket 出现：8000ms 内未满足'); return }
 
+    const racePid = await waitForHelperPid(() => raceStderr)
+    if (racePid === null) { bad('未解析出 helper pid，无法做精确窗口断言'); return }
+
     await send('{"type":"progress","percent":0.5,"mode":"estimated"}\n')
     await sleep(600)
-    if (windowCount() === 0) { bad('progress 后窗口未出现，无法继续竞态检查'); return }
+    if (windowCount(racePid) === 0) { bad('progress 后窗口未出现，无法继续竞态检查'); return }
 
     await send('{"type":"done","reason":"completed","ok":true}\n')
     await sleep(1_350) // linger(1.2s) 已过，hide 动画(~0.4s)进行中
     await send('{"type":"progress","percent":0.1,"mode":"estimated","message":"新一轮"}\n')
     await sleep(1_500)
 
-    if (windowCount() > 0) ok('隐藏动画期间到达的新一轮没有被抹掉，岛重新出现')
+    if (windowCount(racePid) > 0) ok('隐藏动画期间到达的新一轮没有被抹掉，岛重新出现')
     else bad('新一轮被上一轮的复位抹掉了：岛保持隐藏（retract 必须排在 hide 之前）')
   } finally {
     try { process.kill(-child.pid, 'SIGKILL') } catch { /* already gone */ }
@@ -292,7 +321,8 @@ async function phaseIdleTimeout() {
     stdio: ['ignore', 'ignore', 'pipe'],
     detached: true,
   })
-  child.stderr.on('data', () => {})
+  let idleStderr = ''
+  child.stderr.on('data', (d) => { idleStderr += d })
 
   const waitFor = async (predicate, ms, label) => {
     const until = Date.now() + ms
@@ -317,12 +347,13 @@ async function phaseIdleTimeout() {
       socket.on('error', reject)
     })
 
-    if (!await waitFor(() => windowCount() > 0, 6_000, 'progress 后窗口出现')) return
+    const idlePid = await waitForHelperPid(() => idleStderr)
+    if (!await waitFor(() => windowCount(idlePid) > 0, 6_000, 'progress 后窗口出现')) return
     ok('progress 后窗口出现')
 
     // idle=3s，留 5s 余量；期间不发送任何消息。
     await sleep(5_000)
-    if (windowCount() === 0) ok('静默 5s 后窗口自动收起（空闲超时生效）')
+    if (windowCount(idlePid) === 0) ok('静默 5s 后窗口自动收起（空闲超时生效）')
     else bad('静默 5s 后窗口仍在——空闲超时没有生效')
   } finally {
     try { process.kill(-child.pid, 'SIGKILL') } catch { /* already gone */ }
@@ -331,8 +362,148 @@ async function phaseIdleTimeout() {
   }
 }
 
+/**
+ * 审批挂起期间必须不被空闲超时收起。
+ *
+ * 这条用例存在的理由是一次真实故障：用户发起提权审批后等了两三分钟，
+ * 灵动岛在 120 秒的空闲阈值上消失了——而那正是需要它留在屏幕上的时刻
+ * （面板上要出现批准入口）。
+ *
+ * 与 `phaseIdleTimeout` 的关键区别：那个阶段直接向 helper 写 NDJSON，**绕开了
+ * 插件**，因此无法覆盖任何状态机逻辑。这里必须驱动真插件，因为要验证的
+ * 正是"`approval/asked` 置位挂起 → 看门狗不收起"这条状态机路径。
+ *
+ * 断言刻意成对：挂起期间**不收起**，`decided` 之后**仍能收起**。只测前者会
+ * 把"永久抑制"当成修复——那是另一个 bug。
+ */
+async function phaseApprovalHoldsIsland() {
+  if (!windowChecksUsable) {
+    skipped++
+    console.log('\n== 审批挂起期间不收起：跳过（无窗口探针）——跳过不算通过 ==')
+    return
+  }
+
+  const idleMs = 5_000
+  console.log(`\n== 审批挂起期间不收起（idleTimeoutMs=${idleMs}）==`)
+  const approvalSocket = join(dir, 'approval.sock')
+  const child = spawn(HELPER, ['--idle-timeout-ms', String(idleMs), approvalSocket], {
+    stdio: ['ignore', 'ignore', 'pipe'],
+    detached: true,
+  })
+  let approvalStderr = ''
+  child.stderr.on('data', (d) => { approvalStderr += d })
+
+  // 独立的 ctx 与监听器数组：主流程的 listeners 已经属于第一个实例，
+  // 混在一起会让"哪个实例收到了事件"变得含糊。
+  const ownListeners = []
+  const ownDisposers = []
+  const ownCtx = {
+    ...fakeCtx,
+    on: (name, listener) => { ownListeners.push({ name, listener }); return () => {} },
+    effect: (fn, label) => { const d = fn(); ownDisposers.push({ label, disposer: d }); return () => {} },
+  }
+
+  const waitFor = async (predicate, ms, label) => {
+    const until = Date.now() + ms
+    while (Date.now() < until) {
+      if (predicate()) return true
+      await sleep(150)
+    }
+    bad(`${label}：${ms}ms 内未满足`)
+    return false
+  }
+
+  /**
+   * 轮询窗口是否达到期望状态，返回是否达成。
+   *
+   * 断言用轮询而不是固定睡眠：helper 的收起是在它自己的看门狗到期后异步发生的，
+   * 固定睡眠要么太短（误报失败）要么太长（拖慢用例）。实测在 5s 阈值下，固定
+   * 5s 等待正好与它相撞，成了一个偶发失败。
+   */
+  const waitForWindow = async (predicate, ms, label) => {
+    const until = Date.now() + ms
+    while (Date.now() < until) {
+      if (predicate()) return true
+      await sleep(200)
+    }
+    bad(`${label}：${ms}ms 内未满足`)
+    return false
+  }
+
+  try {
+    if (!await waitFor(() => existsSync(approvalSocket), 8_000, 'socket 出现')) return
+
+    // 用 query string 绕开 ESM 缓存，拿到**独立的模块实例**。
+    //
+    // 这一步不是洁癖：`src/activity.ts` 把"当前跟踪哪个会话"存在模块级变量里，
+    // 所以第二次 `apply()` 会与第一个实例共享它——新会话被当作"不是我们的会话"
+    // 而忽略。更麻烦的是各实例的日志会汇到同一个数组，诊断时无法区分是谁在说话
+    // （实测在那上面浪费了一轮排查）。独立实例后每个阶段都是干净的世界。
+    const freshMod = await import(new URL(`file://${join(ROOT, 'src', 'index.ts')}?phase=approval`).href)
+
+    // 插件用同一个 idle 阈值，才能与 helper 的收起时机对齐。
+    freshMod.apply(ownCtx, {
+      socketPath: approvalSocket,
+      helperPath: HELPER,
+      connectTimeoutMs: 15_000,
+      idleTimeoutMs: idleMs,
+      graceMs: 3_000,
+    })
+
+    const emit = (name, ...args) => {
+      for (const l of ownListeners) if (l.name === name) l.listener(...args)
+    }
+
+    emit('session/created', { id: 'approval-e2e' })
+    emit('session/event', { id: 'approval-e2e' }, { type: 'turn/start', data: { turn: 1 } })
+
+    const approvalPid = await waitForHelperPid(() => approvalStderr)
+    if (!await waitFor(() => windowCount(approvalPid) > 0, 6_000, 'turn/start 后窗口出现')) return
+    ok('turn/start 后窗口出现')
+
+    emit('session/event', { id: 'approval-e2e' }, {
+      type: 'approval/asked',
+      data: { id: 'req-1', toolName: 'bash', callId: 'call_1', reason: 'escalate sandbox' },
+    })
+
+    // 挂起期间静默，等满一个空闲周期再多给 2s。
+    //
+    // 必须**超过**整整一个空闲周期：否则看门狗还没触发过，窗口"仍在"什么也证明
+    // 不了。第一个版本就栽在这里——固定睡眠正好与 decided 相撞，断言在一个已经
+    // 不挂起的时刻采样，读成"窗口消失"，看起来像插件 bug。
+    const holdStart = Date.now()
+    await sleep(idleMs + 2_000)
+    const held = (Date.now() - holdStart) / 1000
+    if (windowCount(approvalPid) > 0) {
+      ok(`审批挂起期间静默 ${held.toFixed(1)}s（超过空闲阈值）窗口仍在——两侧看门狗都被心跳刷新`)
+    } else {
+      bad('审批挂起期间窗口消失了——挂起期间没有维持心跳（这正是已修复的故障）')
+    }
+
+    // 配对断言：解除挂起后必须恢复正常的空闲收起，否则就是永久抑制。
+    emit('session/event', { id: 'approval-e2e' }, {
+      type: 'approval/decided',
+      data: { id: 'req-1', outcome: 'allowed-once' },
+    })
+    const collapsed = await waitForWindow(
+      () => windowCount(approvalPid) === 0,
+      idleMs * 3,
+      'approval/decided 后窗口自动收起',
+    )
+    if (collapsed) ok('approval/decided 之后空闲超时恢复正常，窗口自动收起（不是永久抑制）')
+  } finally {
+    for (const { disposer } of ownDisposers) {
+      if (typeof disposer === 'function') { try { await disposer() } catch { /* best effort */ } }
+    }
+    try { process.kill(-child.pid, 'SIGKILL') } catch { /* already gone */ }
+    await sleep(200)
+    rmSync(approvalSocket, { force: true })
+  }
+}
+
 await phaseIdleTimeout()
 await phaseNewTurnDuringHide()
+await phaseApprovalHoldsIsland()
 
 rmSync(dir, { recursive: true, force: true })
 

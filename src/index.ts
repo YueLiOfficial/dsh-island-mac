@@ -282,13 +282,30 @@ export function apply(ctx: Context, config: Config): void {
       // expected rather than abandonment — this keeps the island up through a
       // long tool call that emits nothing for minutes.
       //
-      // A pending approval is the stronger case and the one that actually bit:
-      // while a human decides, `agent/status` may not change at all, so the
-      // running check alone let the bar collapse ~120s into the wait — exactly
-      // when approval entry points need to be on screen. Measured against a real
-      // session, not assumed.
-      if (snapshot.agentRunning || snapshot.approvalPending) {
+      if (snapshot.agentRunning) {
         bumpIdle()
+        return
+      }
+      // A pending approval must not collapse EITHER watchdog.
+      //
+      // Both sides run an independent idle timeout that has to stay in step (see
+      // `BridgeOptions.defaultIdleTimeoutMilliseconds`): the plugin's closes the
+      // island by sending `bye`, and the helper closes the WINDOW on its own.
+      // So merely suppressing our own timer is not enough — staying silent kills
+      // the island from the helper side. A real multi-minute approval wait showed
+      // exactly that, and it is why the first fix here was incomplete.
+      //
+      // Instead of suppressing, emit a low-rate heartbeat that refreshes both.
+      // It carries the state the panel already shows, so it costs one small
+      // frame per idle period rather than a stream.
+      if (snapshot.approvalPending) {
+        send({
+          type: 'progress',
+          percent: snapshot.percent,
+          mode: snapshot.mode ?? 'estimated',
+          ...(snapshot.currentTask === undefined ? {} : { task: snapshot.currentTask }),
+        })
+        // `send` re-arms this timer through `bumpIdle`; that IS the heartbeat.
         return
       }
       // Nothing happened for a while: collapse the island rather than leaving
