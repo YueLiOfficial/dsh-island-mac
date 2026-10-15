@@ -18,7 +18,7 @@ test('order 为 900（落在核心段落之后）', () => {
 })
 
 test('name 带插件前缀，避免与其他插件同名段落冲突', () => {
-  assert.ok(buildProgressInstruction().name.startsWith('dynamic-island-progress'))
+  assert.ok(buildProgressInstruction().name.startsWith('dsh-island-mac'))
 })
 
 test('文本提到工具名，模型才能把指令与工具对应起来', () => {

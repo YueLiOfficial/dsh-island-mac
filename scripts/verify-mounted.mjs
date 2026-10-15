@@ -31,8 +31,13 @@ console.log('== 1. 插件入口能否被宿主加载 ==')
 try {
   const m = await import(new URL(`file://${ENTRY}`).href)
   ok(`加载成功: ${ENTRY}`)
-  if (m.name === 'dynamic-island-progress') ok(`name = ${m.name}`)
-  else bad(`name 异常: ${String(m.name)}`)
+  // Compared against the package name rather than a literal: this repo has been
+  // renamed twice, and a hardcoded identifier here turns a rename into a
+  // false failure. `m.name` is the plugin's internal identifier; the loader
+  // resolves the plugin by `package.json`'s `name`, so the check is that the two
+  // have not drifted apart.
+  if (m.name === PKG) ok(`name = ${m.name}`)
+  else bad(`name 与包名不一致: 插件导出 ${String(m.name)}，package.json 是 ${PKG}`)
   const inj = m.inject ?? []
   if (inj.includes('tools') && inj.includes('systemPrompt')) ok(`inject = ${JSON.stringify(inj)}`)
   else bad(`inject 缺少必需服务: ${JSON.stringify(inj)}`)

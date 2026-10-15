@@ -191,14 +191,26 @@ lsof -t -c DynamicIslandBridge | xargs -r kill
 
 ## 开发
 
-架构说明、构建细节、验证阶梯、通信协议等面向贡献者的内容记录在维护者本地的
-`docs/DEVELOPMENT.md`（该目录不随仓库分发）。
+架构说明、构建细节、验证阶梯与通信协议属于维护者内部记录，**不随仓库分发**。
 
 ```sh
 npm test           # Node 原生跑 TypeScript，无需构建
 npm run typecheck
 npm run build      # 编译 lib/ + 构建并签名 universal 辅助进程
 ```
+
+从源码构建辅助进程**需要完整 Xcode.app**（不是 Command Line Tools）：辅助进程依赖
+DynamicNotchKit，而它是 SwiftUI 包，编译需要只随 Xcode 分发的 `SwiftUIMacros` 宏插件。
+
+几个容易踩到的点，记录在这里以免丢失：
+
+- `scripts/build-helper.sh` 在安装后**必须重新 ad-hoc 签名**二进制。SwiftPM 只留下
+  `linker-signed` 的 CodeDirectory，macOS 26 的 taskgated 会拒绝它，症状是"进程还在
+  但界面永远不动"，而且构建时完全看不出来。**不要删掉那一步。**
+- 辅助进程是**单客户端**的，残留进程会霸占 socket 导致新进程启动失败。
+  用 `lsof -t -c DynamicIslandBridge | xargs -r kill` 清理。
+- 从插件管理器安装本地路径前先 `npm run build`：本地安装不会跑 `prepack`，缺 `lib/`
+  会 `failed to import`。
 
 ## 许可证与致谢
 

@@ -13,7 +13,7 @@ import { REPORT_PROGRESS_TOOL_NAME } from './tool.ts'
  */
 export const SYSTEM_PROMPT_SECTION_ORDER = 900
 
-const SECTION_NAME = 'dynamic-island-progress/instructions'
+const SECTION_NAME = 'dsh-island-mac/instructions'
 
 /**
  * The system-prompt section that makes `report_progress` reachable.

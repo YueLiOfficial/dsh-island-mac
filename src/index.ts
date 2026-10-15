@@ -27,7 +27,15 @@ import type { LineSender } from './transport.ts'
 import { createProgressService, buildReportProgressTool, type IslandProgressService } from './tool.ts'
 import { buildProgressInstruction } from './instructions.ts'
 
-export const name = 'dynamic-island-progress'
+/**
+ * Internal identifier for this plugin.
+ *
+ * Matches the package name so log lines, the system-prompt section prefix and
+ * the package are all greppable as one string. It is NOT what the loader uses to
+ * resolve the plugin — that is `package.json`'s `name` — so it is safe to keep
+ * aligned here without touching the mount.
+ */
+export const name = 'dsh-island-mac'
 
 /**
  * `systemPrompt` is required, not optional: `ctx.systemPrompt.section(...)` is
