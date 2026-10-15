@@ -37,7 +37,7 @@
 
 插件是一个 **dsh bundle**，所以安装走应用内的**插件管理器**（Plugin Manager → 添加插件），
 **不需要手改任何 profile 文件**。那个输入框接受包名、Git 地址、`.tgz` 压缩包，
-或**本地绝对路径**；发布流程见 [scripts/mount-patch.md](scripts/mount-patch.md) 末尾的说明。
+或**本地绝对路径**；发布流程见 [docs/PUBLISHING.md](docs/PUBLISHING.md)。
 
 ### 从本仓库开发
 
@@ -45,11 +45,14 @@
 # 1) 安装依赖（npm cache 会重定向到工作区内，因为 ~/.npm 可能不可写）
 bash scripts/install-deps.sh
 
-# 2) 构建 Swift 辅助进程（需要完整 Xcode，见下）
-bash scripts/build-helper.sh
+# 2) 构建（需要完整 Xcode，见下）：编译 lib/ + universal helper
+bash scripts/build-bundle.sh
 
-# 3) 在插件管理器里「添加插件」，填入本仓库的绝对路径
-#    例：/Users/youl/Code/dsh_plugins/dsh-dynamic-island
+# 3a) 推荐：把仓库根目录的 .tgz 填进插件管理器 → 添加插件
+node /path/to/pnpm.mjs pack      # 或直接 npm run build && npx pnpm pack
+
+# 3b) 或把本仓库的绝对路径填进去（**必须先 npm run build**，
+#     本地目录安装不会跑 prepack，缺 lib/ 会 failed to import）
 ```
 
 ⚠️ **不要**手工往 `~/.dsh/profiles/desktop/cordis.patch.yml` 里加插件行 —— 那条路

@@ -27,6 +27,16 @@ CLI 拒绝碰它，所以安装必须走应用内的**插件管理器**（Plugin
 插件管理器用与 `dsh plugin` 相同的 pnpm 实现安装，把包登记进 profile 的
 `dsh.profile.bundles`，然后应用这一层（安装日志里 `hot=true` 表示不必重启）。
 
+**两条路的区别，选错会得到「装上了但不工作」：**
+
+| 填什么 | 需要先做什么 | 说明 |
+|---|---|---|
+| `.tgz` 文件路径（推荐） | 无 | 包里已经带好编译后的 `lib/` 与 universal helper，最省事 |
+| 仓库绝对路径 | **先 `npm run build`** | 本地目录安装不会跑 `prepack`，缺 `lib/` 就会 `failed to import` |
+
+本仓库根目录下已有一份打包好的 `dsh-dynamic-island-progress-0.1.0.tgz`，可以直接用它。
+自己重新打包见 [docs/PUBLISHING.md](../docs/PUBLISHING.md)。
+
 **`cordis.patch.yml` 一个字都不用改**：包里的 `dsh.bundle.patch` 在它被登记为
 bundle 时会自动作为一层应用。
 
