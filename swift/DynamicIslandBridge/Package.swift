@@ -18,6 +18,10 @@ let package = Package(
             name: "DynamicIslandBridge",
             dependencies: ["DynamicNotchKit"],
             path: "Sources/DynamicIslandBridge"
+            // No `resources:` on purpose. The whale mark is embedded in
+            // WhaleMarkData.swift: a SwiftPM resource bundle is a sidecar the
+            // distributed executable does not carry, and Bundle.module then traps
+            // at first render. See the type doc on WhaleMarkAsset.
         ),
         .testTarget(
             name: "DynamicIslandBridgeTests",

@@ -68,7 +68,25 @@ if [ ! -x "$BUILT" ]; then
 fi
 
 mkdir -p "$(dirname "$OUT")"
-cp "$BUILT" "$OUT"
-chmod +x "$OUT"
+
+# Install by rename, never by writing over the destination in place.
+#
+# `cp` onto a path that is currently some running helper's executable leaves the
+# old process holding a vnode whose contents changed underneath it, and macOS then
+# kills the *next* process that execs that path (observed as `Killed: 9`, with the
+# file itself byte-identical to the build output and its signature valid). That
+# failure looks exactly like a broken plugin, so the rename is not cosmetic.
+STAGED="$OUT.staged.$$"
+cp "$BUILT" "$STAGED"
+chmod +x "$STAGED"
+mv -f "$STAGED" "$OUT"
 echo "==> 已安装到 $OUT"
-"$OUT" --version 2>/dev/null || true
+
+# Real check, not `|| true`: a helper that cannot print its version is a helper
+# that will not start, and the plugin manager would report it as unreachable.
+if ! "$OUT" --version; then
+  echo "✖ $OUT 无法运行（--version 失败）。" >&2
+  echo "  如果上面是 'Killed: 9'，多半还有旧 helper 进程占着这个路径：" >&2
+  echo "    lsof -t \"$OUT\" | xargs -r kill -9" >&2
+  exit 1
+fi

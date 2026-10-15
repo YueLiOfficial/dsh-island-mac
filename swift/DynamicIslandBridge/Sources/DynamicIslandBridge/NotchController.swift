@@ -37,7 +37,7 @@ public final class NotchController {
     private let idleNanoseconds: UInt64
 
     private var presenter: NotchPresenter
-    private var notch: DynamicNotch<ProgressDetail, EmptyView, ProgressPill>?
+    private var notch: DynamicNotch<ProgressDetail, WhaleMark, ProgressPill>?
 
     private var observationCancellables = Set<AnyCancellable>()
     private var effectContinuation: AsyncStream<NotchEffect>.Continuation?
@@ -80,12 +80,12 @@ public final class NotchController {
         let buffer = self.buffer
         let appearance = self.appearance
 
-        let notch = DynamicNotch<ProgressDetail, EmptyView, ProgressPill>(
+        let notch = DynamicNotch<ProgressDetail, WhaleMark, ProgressPill>(
             // Not `.keepVisible` and not `.all` — see the type doc.
             hoverBehavior: [.increaseShadow],
             style: .auto,
             expanded: { ProgressDetail(buffer: buffer, appearance: appearance) },
-            compactLeading: { EmptyView() },
+            compactLeading: { WhaleMark() },
             compactTrailing: { ProgressPill(buffer: buffer) }
         )
         self.notch = notch
