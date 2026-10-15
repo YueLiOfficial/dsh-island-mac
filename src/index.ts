@@ -277,12 +277,17 @@ export function apply(ctx: Context, config: Config): void {
   const bumpIdle = (): void => {
     clearIdleTimer()
     idleTimer = setTimeout(() => {
+      const snapshot = machine.snapshot()
       // A running agent means work is genuinely in progress, so silence is
-      // expected rather than abandonment. This is what keeps the island up
-      // through a long tool call — and, once approvals land, through a wait for
-      // a human decision. Without it the bar vanished mid-task at exactly the
-      // moment the user was being asked to act.
-      if (machine.snapshot().agentRunning) {
+      // expected rather than abandonment — this keeps the island up through a
+      // long tool call that emits nothing for minutes.
+      //
+      // A pending approval is the stronger case and the one that actually bit:
+      // while a human decides, `agent/status` may not change at all, so the
+      // running check alone let the bar collapse ~120s into the wait — exactly
+      // when approval entry points need to be on screen. Measured against a real
+      // session, not assumed.
+      if (snapshot.agentRunning || snapshot.approvalPending) {
         bumpIdle()
         return
       }

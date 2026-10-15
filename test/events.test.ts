@@ -168,6 +168,7 @@ test('无关注事件返回 changed=false 且不触碰状态', () => {
   const before = m.snapshot()
   // 载荷刻意是合法形状：这样若将来有人误把某个事件类型接进进度通道，断言会因为
   // 「类型被识别」而失败，而不是因为载荷畸形而侥幸通过。
+  // `approval/asked` / `approval/decided` 现已接入，单独覆盖，故不在此列。
   for (const t of ['user/message', 'assistant/message', 'request/context', 'plan/mode', '未来/未知']) {
     const r = reduceSessionEvent(m, ev(t, { turn: 1, step: 1, name: 'Bash', arguments: '{}' }))
     assert.equal(r.changed, false, `${t} 被误认为进度事件`)
@@ -264,4 +265,86 @@ test('turn/start 携带非法 turn 值不抛异常', () => {
   for (const bad of [null, 'x', undefined, {}, NaN]) {
     assert.doesNotThrow(() => reduceSessionEvent(m, ev('turn/start', { turn: bad })))
   }
+})
+
+// ---------------------------------------------------------------------------
+// 审批挂起（approval/asked / approval/decided）
+//
+// 复现用户实测的 bug：等待审批时没有任何事件，120 秒后空闲看门狗收起了灵动岛，
+// 而面板上正要显示批准入口。这两条是持久化审计事件，是判断"是否有人类决定在挂起"
+// 的唯一准确信号。
+// ---------------------------------------------------------------------------
+
+test('approval/asked 标记为挂起，approval/decided 解除', () => {
+  const m = new ProgressMachine()
+  reduceSessionEvent(m, ev('turn/start', { turn: 1 }))
+
+  const asked = reduceSessionEvent(m, ev('approval/asked', {
+    id: 'req-1',
+    toolName: 'bash',
+    callId: 'call_1',
+    reason: 'escalate sandbox',
+  }))
+  assert.equal(asked.changed, true)
+  assert.equal(asked.snapshot.approvalPending, true)
+
+  const decided = reduceSessionEvent(m, ev('approval/decided', { id: 'req-1', outcome: 'rejected' }))
+  assert.equal(decided.changed, true)
+  assert.equal(decided.snapshot.approvalPending, false)
+})
+
+test('审批挂起不改动百分比（它说明人在决策，不说明完成度）', () => {
+  const m = new ProgressMachine()
+  reduceSessionEvent(m, ev('turn/start', { turn: 1 }))
+  const before = m.snapshot().percent
+  reduceSessionEvent(m, ev('approval/asked', { id: 'r1', toolName: 'bash' }))
+  assert.equal(m.snapshot().percent, before)
+})
+
+test('并发审批：多个 asked，只有全部 decided 才算解除', () => {
+  const m = new ProgressMachine()
+  reduceSessionEvent(m, ev('turn/start', { turn: 1 }))
+  reduceSessionEvent(m, ev('approval/asked', { id: 'r1', toolName: 'bash' }))
+  reduceSessionEvent(m, ev('approval/asked', { id: 'r2', toolName: 'bash' }))
+  assert.equal(m.snapshot().approvalPending, true)
+
+  reduceSessionEvent(m, ev('approval/decided', { id: 'r1', outcome: 'allowed-once' }))
+  assert.equal(m.snapshot().approvalPending, true, '还有一个未决，不能提前解除')
+
+  reduceSessionEvent(m, ev('approval/decided', { id: 'r2', outcome: 'rejected' }))
+  assert.equal(m.snapshot().approvalPending, false)
+})
+
+test('未知 id 的 decided 不会把挂起错误地清掉', () => {
+  const m = new ProgressMachine()
+  reduceSessionEvent(m, ev('turn/start', { turn: 1 }))
+  reduceSessionEvent(m, ev('approval/asked', { id: 'r1', toolName: 'bash' }))
+  const r = reduceSessionEvent(m, ev('approval/decided', { id: 'never-asked', outcome: 'rejected' }))
+  assert.equal(r.snapshot.approvalPending, true)
+})
+
+test('畸形审批载荷不抛异常，也不改动状态', () => {
+  const m = new ProgressMachine()
+  reduceSessionEvent(m, ev('turn/start', { turn: 1 }))
+  const before = m.snapshot()
+  for (const bad of [null, undefined, 42, 'x', {}, { id: 42 }, { id: '' }]) {
+    assert.doesNotThrow(() => reduceSessionEvent(m, ev('approval/asked', bad)))
+    assert.doesNotThrow(() => reduceSessionEvent(m, ev('approval/decided', bad)))
+  }
+  assert.deepEqual(m.snapshot(), before)
+})
+
+test('审批挂起时面板显示等待批准，而不是空白', () => {
+  const m = new ProgressMachine()
+  reduceSessionEvent(m, ev('turn/start', { turn: 1 }))
+  reduceSessionEvent(m, ev('approval/asked', { id: 'r1', toolName: 'bash' }))
+  assert.match(m.snapshot().currentTask ?? '', /等待批准/)
+})
+
+test('新 turn 清掉上一轮的挂起审批（不能永久卡住）', () => {
+  const m = new ProgressMachine()
+  reduceSessionEvent(m, ev('turn/start', { turn: 1 }))
+  reduceSessionEvent(m, ev('approval/asked', { id: 'r1', toolName: 'bash' }))
+  const r = reduceSessionEvent(m, ev('turn/start', { turn: 2 }))
+  assert.equal(r.snapshot.approvalPending, false)
 })

@@ -32,6 +32,19 @@ export interface ProgressSnapshot {
   agentRunning: boolean
   /** How many subagents are running right now. Displayed as a suffix. */
   subagentCount: number
+  /**
+   * Whether an `approval/asked` is still waiting for its `approval/decided`.
+   *
+   * This is the ONE signal that distinguishes "a human is being asked to decide"
+   * from "nothing is happening": during an approval wait the event stream is
+   * genuinely silent, so every activity-based heuristic reads as idle. Verified
+   * against a real session — a multi-minute approval wait let the idle watchdog
+   * collapse the island exactly when the user needed it on screen.
+   *
+   * An id SET rather than a boolean internally, because approvals can overlap and
+   * only the last `decided` should release the hold.
+   */
+  approvalPending: boolean
   turn: number | null
   ok: boolean
 }
@@ -103,6 +116,8 @@ export class ProgressMachine {
   private subagents: string[] = []
   /** Set from `agent/status`; read by the idle watchdog, never displayed raw. */
   private agentRunning = false
+  /** Ids of approvals asked but not yet decided. Non-empty ⇒ a human is deciding. */
+  private pendingApprovals: string[] = []
 
   /**
    * Begin a new turn. Resets to the 5% floor and clears any precise lock —
@@ -123,9 +138,12 @@ export class ProgressMachine {
     this.mode = 'estimated'
     this.message = undefined
     // Work from the previous turn is over; carrying any of it forward would show
-    // stale text until the new turn produces its own events.
+    // stale text until the new turn produces its own events. A pending approval
+    // is cleared too: its `decided` may never arrive (reload, crash), and a stuck
+    // "等待批准" plus a permanent idle-suppression would survive forever.
     this.inFlight = []
     this.subagents = []
+    this.pendingApprovals = []
     this.turn = turn
     this.ok = true
     return this.snapshot()
@@ -201,6 +219,25 @@ export class ProgressMachine {
   }
 
   /**
+   * `approval/asked` — a human is now deciding something.
+   *
+   * Recorded by id so overlapping asks release in the right order, and a
+   * `decided` for a request this process never saw cannot clear a live hold.
+   */
+  approvalAsked(id: string): ProgressSnapshot {
+    if (!this.pendingApprovals.includes(id)) {
+      this.pendingApprovals = [...this.pendingApprovals, id]
+    }
+    return this.snapshot()
+  }
+
+  /** `approval/decided` — that ask is settled, whatever the outcome was. */
+  approvalDecided(id: string): ProgressSnapshot {
+    this.pendingApprovals = this.pendingApprovals.filter((pending) => pending !== id)
+    return this.snapshot()
+  }
+
+  /**
    * Advance the estimate from a step number. Ignored entirely while in
    * `precise` — a heuristic must never touch a precise value.
    */
@@ -255,6 +292,7 @@ export class ProgressMachine {
     this.inFlight = []
     this.subagents = []
     this.agentRunning = false
+    this.pendingApprovals = []
     this.turn = null
     this.ok = true
     return this.snapshot()
@@ -269,7 +307,13 @@ export class ProgressMachine {
    * closest a sequential harness gets to "what is happening right now".
    */
   private taskLabel(): string | undefined {
-    const base = this.inFlight.length > 0 ? this.inFlight[this.inFlight.length - 1]!.label : undefined
+    // A pending approval outranks everything: it is the one thing the user has to
+    // act on, and while it is pending nothing else can progress anyway.
+    const base = this.pendingApprovals.length > 0
+      ? '等待批准'
+      : this.inFlight.length > 0
+        ? this.inFlight[this.inFlight.length - 1]!.label
+        : undefined
     if (this.subagents.length <= 1) return base
     return base === undefined ? `${this.subagents.length} 个子代理运行中` : `${base} · ${this.subagents.length} 子代理`
   }
@@ -284,6 +328,7 @@ export class ProgressMachine {
       currentTask: this.taskLabel(),
       agentRunning: this.agentRunning,
       subagentCount: this.subagents.length,
+      approvalPending: this.pendingApprovals.length > 0,
       turn: this.turn,
       ok: this.ok,
     }

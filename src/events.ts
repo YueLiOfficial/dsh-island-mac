@@ -194,6 +194,37 @@ function onToolCall(machine: ProgressMachine, data: unknown): ReductionResult {
   return { changed: true, snapshot: machine.setCurrentTask(task), todoRatio: null }
 }
 
+/** Reads `data.reason`'s human-readable kind… or `data.id`, for approval audit pairs. */
+function readId(data: unknown): string | null {
+  if (!isRecord(data)) return null
+  const id = data.id
+  if (typeof id !== 'string') return null
+  const trimmed = id.trim()
+  return trimmed.length === 0 ? null : trimmed
+}
+
+/**
+ * `approval/asked` — a human is being asked to decide something.
+ *
+ * These two events are the ONLY reliable signal that distinguishes "waiting on a
+ * person" from "nothing is happening". During an approval wait the event stream
+ * is genuinely silent, so every activity heuristic reads as idle — verified
+ * against a real session, where a multi-minute wait let the idle watchdog
+ * collapse the island exactly when it needed to stay up.
+ */
+function onApprovalAsked(machine: ProgressMachine, data: unknown): ReductionResult {
+  const id = readId(data)
+  if (id === null) return { changed: false, snapshot: machine.snapshot(), todoRatio: null }
+  return { changed: true, snapshot: machine.approvalAsked(id), todoRatio: null }
+}
+
+/** `approval/decided` — that ask settled. The outcome does not change the bar. */
+function onApprovalDecided(machine: ProgressMachine, data: unknown): ReductionResult {
+  const id = readId(data)
+  if (id === null) return { changed: false, snapshot: machine.snapshot(), todoRatio: null }
+  return { changed: true, snapshot: machine.approvalDecided(id), todoRatio: null }
+}
+
 // ---------------------------------------------------------------------------
 // Reducer
 // ---------------------------------------------------------------------------
@@ -222,6 +253,10 @@ export function reduceSessionEvent(machine: ProgressMachine, event: SessionEvent
       return onTodoWrite(machine, event.data)
     case 'tool/call':
       return onToolCall(machine, event.data)
+    case 'approval/asked':
+      return onApprovalAsked(machine, event.data)
+    case 'approval/decided':
+      return onApprovalDecided(machine, event.data)
     default:
       // Not a progress anchor. Return without touching the machine so the
       // caller can skip an unnecessary socket write.
