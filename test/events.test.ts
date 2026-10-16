@@ -348,3 +348,76 @@ test('新 turn 清掉上一轮的挂起审批（不能永久卡住）', () => {
   const r = reduceSessionEvent(m, ev('turn/start', { turn: 2 }))
   assert.equal(r.snapshot.approvalPending, false)
 })
+
+// ---------------------------------------------------------------------------
+// 面板上的「等什么批准」——toolName + reason
+//
+// 方案 A 的可补项：不动 answerer 链，只把审计事件里已经带的细节显示出来。
+// 源码依据（@deepseek-ai/dsh-user-approval 的 request()）：
+//   session.append("approval/asked", { toolName, callId?, reason? })
+//   const outcome = await this.decide(req, session)   // waterfall 在 append 之后
+// 所以这三个字段就在持久化事件里，不必去 tap Cordis 的 approval/request 中间件。
+// ---------------------------------------------------------------------------
+
+test('approval/asked 的 toolName 显示在面板上', () => {
+  const m = new ProgressMachine()
+  reduceSessionEvent(m, ev('turn/start', { turn: 1 }))
+  const r = reduceSessionEvent(m, ev('approval/asked', {
+    id: 'r1', toolName: 'bash', callId: 'c1', reason: 'escalate sandbox to danger-full-access',
+  }))
+  assert.match(r.snapshot.currentTask ?? '', /bash/)
+  assert.match(r.snapshot.currentTask ?? '', /等待批准/)
+})
+
+test('reason 也显示，且被截断到合理长度', () => {
+  const m = new ProgressMachine()
+  reduceSessionEvent(m, ev('turn/start', { turn: 1 }))
+  const long = 'x'.repeat(500)
+  reduceSessionEvent(m, ev('approval/asked', { id: 'r1', toolName: 'bash', reason: long }))
+  const label = m.snapshot().currentTask ?? ''
+  assert.ok([...label].length <= 120, `标签过长：${[...label].length} 码点`)
+  assert.match(label, /x/)
+})
+
+test('reason 里的换行/回车被剥离（否则会撕裂 NDJSON 帧）', () => {
+  const m = new ProgressMachine()
+  reduceSessionEvent(m, ev('turn/start', { turn: 1 }))
+  reduceSessionEvent(m, ev('approval/asked', {
+    id: 'r1', toolName: 'bash', reason: 'line one\nline two\r\nline three',
+  }))
+  const label = m.snapshot().currentTask ?? ''
+  assert.ok(!label.includes('\n'), '含裸换行')
+  assert.ok(!label.includes('\r'), '含裸回车')
+})
+
+test('reason 缺失或畸形时仍显示工具名', () => {
+  for (const bad of [undefined, null, 42, {}, '']) {
+    const m = new ProgressMachine()
+    reduceSessionEvent(m, ev('turn/start', { turn: 1 }))
+    const r = reduceSessionEvent(m, ev('approval/asked', { id: 'r1', toolName: 'bash', reason: bad }))
+    assert.match(r.snapshot.currentTask ?? '', /bash/, `reason=${JSON.stringify(bad)} 时丢了工具名`)
+  }
+})
+
+test('toolName 缺失时退化为通用文案，而不是空白', () => {
+  const m = new ProgressMachine()
+  reduceSessionEvent(m, ev('turn/start', { turn: 1 }))
+  for (const bad of [undefined, null, 42, '', '   ']) {
+    const m2 = new ProgressMachine()
+    reduceSessionEvent(m2, ev('turn/start', { turn: 1 }))
+    const r = reduceSessionEvent(m2, ev('approval/asked', { id: 'r1', toolName: bad }))
+    assert.match(r.snapshot.currentTask ?? '', /等待批准/, `toolName=${JSON.stringify(bad)}`)
+  }
+})
+
+test('decided 之后回到普通标签，不残留审批文案', () => {
+  const m = new ProgressMachine()
+  reduceSessionEvent(m, ev('turn/start', { turn: 1 }))
+  reduceSessionEvent(m, ev('approval/asked', {
+    id: 'r1', toolName: 'bash', reason: 'escalate sandbox',
+  }))
+  assert.match(m.snapshot().currentTask ?? '', /bash/)
+
+  reduceSessionEvent(m, ev('approval/decided', { id: 'r1', outcome: 'allowed-once' }))
+  assert.doesNotMatch(m.snapshot().currentTask ?? '', /等待批准/)
+})

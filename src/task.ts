@@ -30,6 +30,33 @@ export function truncateTask(text: string, max: number = MAX_TASK_LENGTH): strin
   return `${points.slice(0, max - 1).join('')}…`
 }
 
+/**
+ * Upper bound for one-line detail folded into a label, in code points.
+ *
+ * Tighter than `MAX_TASK_LENGTH` because a detail shares its line with a prefix
+ * (e.g. "等待批准：bash · …") and the panel gives the label three lines.
+ */
+export const MAX_DETAIL_LENGTH = 100
+
+/**
+ * Makes arbitrary text safe to fold into a one-line label.
+ *
+ * Two jobs, both non-negotiable for text that reaches the wire:
+ *
+ * 1. Newlines and carriage returns are flattened to spaces. A raw `\n` inside a
+ *    JSON string would split one logical message across two frames and desync the
+ *    NDJSON reader for the rest of the connection.
+ * 2. Truncation is by CODE POINT, never by UTF-16 unit, so an emoji or any astral
+ *    character is never sliced into a lone surrogate.
+ *
+ * The input here is model-authored free text (an approval `reason`), so both are
+ * reachable, not theoretical.
+ */
+export function sanitizeDetail(text: string, max: number = MAX_DETAIL_LENGTH): string {
+  const flattened = text.replaceAll('\n', ' ').replaceAll('\r', ' ').trim()
+  return truncateTask(flattened, max)
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
 }

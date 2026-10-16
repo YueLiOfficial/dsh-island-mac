@@ -1,6 +1,6 @@
 import type { ProgressMachine, ProgressSnapshot } from './progress.ts'
 import { ESTIMATE_CEILING } from './progress.ts'
-import { currentTaskFromTodos, currentTaskFromToolCall } from './task.ts'
+import { currentTaskFromTodos, currentTaskFromToolCall, sanitizeDetail } from './task.ts'
 
 /**
  * The minimal shape this reducer needs from a durable session event.
@@ -215,7 +215,36 @@ function readId(data: unknown): string | null {
 function onApprovalAsked(machine: ProgressMachine, data: unknown): ReductionResult {
   const id = readId(data)
   if (id === null) return { changed: false, snapshot: machine.snapshot(), todoRatio: null }
-  return { changed: true, snapshot: machine.approvalAsked(id), todoRatio: null }
+
+  // `toolName` / `reason` are on this event itself (the service appends them
+  // before dispatching the answerer waterfall), so the detail costs nothing
+  // extra and does NOT require tapping the approval middleware — which is what
+  // keeps this display-only.
+  const toolName = readApprovalString(data, 'toolName')
+  const reason = readApprovalString(data, 'reason')
+  const detail = [toolName, reason].filter((part): part is string => part !== null).join(' · ')
+
+  return {
+    changed: true,
+    snapshot: machine.approvalAsked(id, detail.length > 0 ? detail : undefined),
+    todoRatio: null,
+  }
+}
+
+/**
+ * Reads and sanitises one approval string field.
+ *
+ * `reason` is model-authored free text that ends up on a single-line label and
+ * then on the wire, so it must be flattened and code-point truncated — see
+ * `sanitizeDetail`. Returns null when absent or unreadable, so callers can decide
+ * whether partial detail beats none.
+ */
+function readApprovalString(data: unknown, key: string): string | null {
+  if (!isRecord(data)) return null
+  const value = data[key]
+  if (typeof value !== 'string') return null
+  const clean = sanitizeDetail(value)
+  return clean.length === 0 ? null : clean
 }
 
 /** `approval/decided` — that ask settled. The outcome does not change the bar. */

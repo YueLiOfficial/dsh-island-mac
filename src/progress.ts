@@ -118,6 +118,15 @@ export class ProgressMachine {
   private agentRunning = false
   /** Ids of approvals asked but not yet decided. Non-empty ⇒ a human is deciding. */
   private pendingApprovals: string[] = []
+  /**
+   * What the FIRST pending approval is about, e.g. "bash · escalate sandbox".
+   *
+   * Display-only, and keyed to the oldest pending id: with approvals overlapping,
+   * the one the user has been waiting on longest is the useful one to show. Kept
+   * as prepared text rather than raw payload so the machine does no sanitising at
+   * snapshot time (which runs on every read).
+   */
+  private approvalDetail: string | undefined = undefined
 
   /**
    * Whether work is outstanding, i.e. something is expected to arrive later.
@@ -164,6 +173,7 @@ export class ProgressMachine {
     this.inFlight = []
     this.subagents = []
     this.pendingApprovals = []
+    this.approvalDetail = undefined
     this.turn = turn
     this.ok = true
     return this.snapshot()
@@ -244,16 +254,25 @@ export class ProgressMachine {
    * Recorded by id so overlapping asks release in the right order, and a
    * `decided` for a request this process never saw cannot clear a live hold.
    */
-  approvalAsked(id: string): ProgressSnapshot {
+  approvalAsked(id: string, detail?: string): ProgressSnapshot {
     if (!this.pendingApprovals.includes(id)) {
       this.pendingApprovals = [...this.pendingApprovals, id]
+      // Only the first candidate supplies the label: with two pending, the older
+      // one is the one the user has been staring at.
+      if (this.approvalDetail === undefined && detail !== undefined && detail.length > 0) {
+        this.approvalDetail = detail
+      }
     }
     return this.snapshot()
   }
 
   /** `approval/decided` — that ask is settled, whatever the outcome was. */
   approvalDecided(id: string): ProgressSnapshot {
+    const wasPending = this.pendingApprovals.includes(id)
     this.pendingApprovals = this.pendingApprovals.filter((pending) => pending !== id)
+    // Clear the description with the last pending approval, otherwise a settled
+    // request's text would linger on the line after the wait is over.
+    if (wasPending && this.pendingApprovals.length === 0) this.approvalDetail = undefined
     return this.snapshot()
   }
 
@@ -313,6 +332,7 @@ export class ProgressMachine {
     this.subagents = []
     this.agentRunning = false
     this.pendingApprovals = []
+    this.approvalDetail = undefined
     this.turn = null
     this.ok = true
     return this.snapshot()
@@ -328,9 +348,13 @@ export class ProgressMachine {
    */
   private taskLabel(): string | undefined {
     // A pending approval outranks everything: it is the one thing the user has to
-    // act on, and while it is pending nothing else can progress anyway.
+    // act on, and while it is pending nothing else can progress anyway. The
+    // detail ("bash · escalate sandbox") says WHICH decision is waiting, so the
+    // user can judge without leaving the island.
     const base = this.pendingApprovals.length > 0
-      ? '等待批准'
+      ? this.approvalDetail === undefined
+        ? '等待批准'
+        : `等待批准：${this.approvalDetail}`
       : this.inFlight.length > 0
         ? this.inFlight[this.inFlight.length - 1]!.label
         : undefined
