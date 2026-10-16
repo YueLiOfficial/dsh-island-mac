@@ -131,21 +131,33 @@ export class ProgressMachine {
   /**
    * Whether work is outstanding, i.e. something is expected to arrive later.
    *
-   * This is the island's liveness signal, and it is deliberately broader than
-   * `approvalPending`. A pending approval was only the FIRST case found; the
-   * second was an ordinary tool call that blocks on the user — in a real session
-   * `ask_user_question` stayed in flight for 219 seconds with no `approval/*`
-   * event at all, so an approval-keyed heartbeat let the island collapse
-   * mid-wait. Any in-flight tool call is such a wait, which also covers long
-   * builds and downloads.
+   * This is the island's liveness signal. It was widened twice, and the second
+   * widening had to be narrowed again — worth recording:
    *
-   * Deliberately NOT "the turn is open": a turn whose process half-dies stays
-   * open forever, and the idle timeout is the only thing that recovers from that
-   * (a half-open socket never produces EOF). Requiring an actual pending tool or
-   * approval keeps that safety net intact.
+   * - A pending approval was only the FIRST case found.
+   * - The second was an ordinary tool call that blocks on the user: in a real
+   *   session `ask_user_question` stayed in flight for 219 seconds with no
+   *   `approval/*` event at all, so an approval-keyed heartbeat let the island
+   *   collapse mid-wait. Any in-flight tool call is such a wait, which also covers
+   *   long builds and downloads.
+   * - `agentRunning` was the third, and it was a mistake. `agent/status` fires
+   *   ONLY on a real transition (the agent loop's `setPhase` compares against the
+   *   previous value, and an invariant layer rejects no-op transitions), so an
+   *   agent that stays running never reports idle. That makes the flag
+   *   monotonically true, which DEADLOCKS the watchdog: the heartbeat is renewed
+   *   by this very predicate, and the only path that clears the flag — the
+   *   watchdog firing, sending `bye`, and resetting the machine — can then never
+   *   run. Observed as the island sitting at 100% forever.
+   *
+   * So liveness is decided ONLY by signals that terminate on their own: a tool
+   * call finishes, an approval is decided. Both are bounded by real work.
+   *
+   * Deliberately NOT "the turn is open": a turn whose process half-dies stays open
+   * forever, and the idle timeout is the only thing that recovers from that (a
+   * half-open socket never produces EOF).
    */
   hasOutstandingWork(): boolean {
-    return this.pendingApprovals.length > 0 || this.inFlight.length > 0 || this.agentRunning
+    return this.pendingApprovals.length > 0 || this.inFlight.length > 0
   }
 
   /**
@@ -320,6 +332,12 @@ export class ProgressMachine {
     } else {
       this.ok = false
     }
+    // Defence in depth. `agent/status` only fires on a real transition, so an
+    // agent that stays running never reports idle and this flag can stay set
+    // indefinitely. It is deliberately NOT part of `hasOutstandingWork` (see the
+    // note there — it deadlocked the watchdog), but clearing it at a turn boundary
+    // stops it lingering if future code ever consults it.
+    this.agentRunning = false
     return this.snapshot()
   }
 

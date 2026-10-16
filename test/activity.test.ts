@@ -306,18 +306,15 @@ test('hasOutstandingWork：未决审批为真，裁决后回到假', () => {
   assert.equal(m.hasOutstandingWork(), false)
 })
 
-test('hasOutstandingWork：agent 在运行为真', () => {
+test('hasOutstandingWork：agent 在运行**不**构成活性（否则岛永久不收）', () => {
+  // 这条断言曾经是相反的。它把「agent/status 报 running 即为有未决工作」当成
+  // 正确行为固化下来，而那个假设正是实测故障「岛卡在 100% 不消失」的根因。
+  // 详见 hasOutstandingWork 的文档注释：该信号单调为真，会让看门狗死锁。
   const m = fresh()
+  reduceActivityEvent(m, 'session/created', { session: { id: 'ours' } })
   onAgentStatus(m, { agent: { session: { id: 'ours' } }, status: 'running' })
-  // 该调用的会话过滤依赖模块级跟踪状态，所以先建立跟踪。
-  const m2 = fresh()
-  reduceActivityEvent(m2, 'session/created', { session: { id: 'ours' } })
-  onAgentStatus(m2, { agent: { session: { id: 'ours' } }, status: 'running' })
-  assert.equal(m2.hasOutstandingWork(), true)
-  onAgentStatus(m2, { agent: { session: { id: 'ours' } }, status: 'idle' })
-  assert.equal(m2.hasOutstandingWork(), false)
-  // 未跟踪的会话不得影响本机状态。
-  assert.equal(m.hasOutstandingWork(), false)
+  assert.equal(m.snapshot().agentRunning, true, '字段仍如实反映状态')
+  assert.equal(m.hasOutstandingWork(), false, '但它不得让岛永久保活')
 })
 
 test('hasOutstandingWork：多种未决同时存在时，清掉一个仍为真', () => {
@@ -348,4 +345,49 @@ test('hasOutstandingWork：reset 后为假', () => {
   onToolPreExecute(m, { callId: 'c1', name: 'Bash', arguments: { command: 'ls' } })
   m.reset()
   assert.equal(m.hasOutstandingWork(), false)
+})
+
+// ---------------------------------------------------------------------------
+// 回归：agent/status 的 running 不得成为永久粘滞的活性来源
+//
+// 实测故障：灵动岛卡在 100% 不消失。
+//
+// 运行时依据（app.asar 里 Agent 的 setPhase）：
+//   /** Commit a phase and publish its externally visible status transition. */
+//   setPhase(next) { const previousStatus = this.status; ...;
+//     if (status !== previousStatus) this.dispatch.emit("agent/status", { status }) }
+// 并且同处声明了不变式「no-op agent/status transitions fail」——即不会发冗余的
+// 同状态事件。所以 agent 不会"超时"变成 idle：它一直 running，这个信号一旦为真
+// 就再也不回落。
+//
+// 把它当作活性来源会形成死锁：心跳靠它续期，而唯一能把它清掉的路径
+// （看门狗到期 → 发 bye → reset）又因为心跳续期而永远走不到。
+//
+// 因此活性只由「有界且自行终止」的信号决定：进行中的工具调用、未决审批。
+// ---------------------------------------------------------------------------
+
+test('回归：agent 一直 running 时，回合结束后仍必须能收起（否则岛卡住不消失）', () => {
+  const m = fresh()
+  reduceActivityEvent(m, 'session/created', { session: { id: 'ours' } })
+  onAgentStatus(m, { agent: { session: { id: 'ours' } }, status: 'running' })
+  assert.equal(m.snapshot().agentRunning, true, '前提：信号确实被记录了')
+
+  // 一个完整回合：开始、跑个工具、结束。结束后不应有任何未决工作。
+  reduceSessionEvent(m, ev('turn/start', { turn: 1 }))
+  onToolPreExecute(m, { callId: 'c1', name: 'Bash', arguments: { command: 'ls' } })
+  onToolPostExecute(m, { callId: 'c1', name: 'Bash' })
+  reduceSessionEvent(m, ev('turn/end', { turn: 1, reason: { kind: 'completed' } }))
+
+  assert.equal(
+    m.hasOutstandingWork(), false,
+    'agent/status 粘在 running 上不得让岛永久不收（实测故障：卡在 100%）',
+  )
+})
+
+test('agentRunning 仍然被记录（供未来使用），但不参与活性判据', () => {
+  const m = fresh()
+  reduceActivityEvent(m, 'session/created', { session: { id: 'ours' } })
+  onAgentStatus(m, { agent: { session: { id: 'ours' } }, status: 'running' })
+  assert.equal(m.snapshot().agentRunning, true, '字段本身仍应如实反映状态')
+  assert.equal(m.hasOutstandingWork(), false, '但它不是活性来源')
 })
