@@ -363,18 +363,82 @@ async function phaseIdleTimeout() {
 }
 
 /**
+ * 起一个独立 helper + 独立插件实例，返回驱动它所需的一切。
+ *
+ * 两个"保持在屏"用例此前各自复制了一遍这些代码，而重复恰恰藏住了问题：每个
+ * 阶段的 socket / 模块实例 / 诊断稍有不同，排查时分不清差异是真实的还是抄写
+ * 误差。集中一处后，各阶段只描述自己关心的行为。
+ */
+async function startIsolatedPhase(name, idleMs, socketName) {
+  const phaseSocket = join(dir, socketName)
+  const child = spawn(HELPER, ['--idle-timeout-ms', String(idleMs), phaseSocket], {
+    stdio: ['ignore', 'ignore', 'pipe'],
+    detached: true,
+  })
+  let stderr = ''
+  child.stderr.on('data', (d) => { stderr += d })
+
+  const listeners = []
+  const disposers = []
+  const ctx = {
+    ...fakeCtx,
+    on: (n, l) => { listeners.push({ name: n, listener: l }); return () => {} },
+    effect: (fn, label) => { const d = fn(); disposers.push({ label, disposer: d }); return () => {} },
+  }
+
+  const until = Date.now() + 8_000
+  while (Date.now() < until && !existsSync(phaseSocket)) await sleep(100)
+  if (!existsSync(phaseSocket)) { bad(`${name}：socket 出现：8000ms 内未满足`); return null }
+
+  // 独立模块实例：activity.ts 把「跟踪哪个会话」存在模块级变量里，共用实例会让
+  // 各阶段互相把对方的会话当成"不是我们的"而忽略。
+  const freshMod = await import(new URL(`file://${join(ROOT, 'src', 'index.ts')}?phase=${name}`).href)
+  freshMod.apply(ctx, {
+    socketPath: phaseSocket,
+    helperPath: HELPER,
+    connectTimeoutMs: 15_000,
+    idleTimeoutMs: idleMs,
+    graceMs: 3_000,
+  })
+
+  const emit = (n, ...args) => { for (const l of listeners) if (l.name === n) l.listener(...args) }
+  const pid = await waitForHelperPid(() => stderr)
+  if (pid === null) { bad(`${name}：未解析出 helper pid`); return null }
+
+  const cleanup = async () => {
+    for (const { disposer } of disposers) {
+      if (typeof disposer === 'function') { try { await disposer() } catch { /* best effort */ } }
+    }
+    try { process.kill(-child.pid, 'SIGKILL') } catch { /* already gone */ }
+    await sleep(200)
+    rmSync(phaseSocket, { force: true })
+  }
+
+  return { emit, pid, cleanup }
+}
+
+/** 轮询窗口是否达到期望状态。固定睡眠与异步收起时机相撞过，所以用轮询。 */
+async function waitForWindowState(predicate, ms, label) {
+  const until = Date.now() + ms
+  while (Date.now() < until) {
+    if (predicate()) return true
+    await sleep(200)
+  }
+  bad(`${label}：${ms}ms 内未满足`)
+  return false
+}
+
+/**
  * 审批挂起期间必须不被空闲超时收起。
  *
  * 这条用例存在的理由是一次真实故障：用户发起提权审批后等了两三分钟，
- * 灵动岛在 120 秒的空闲阈值上消失了——而那正是需要它留在屏幕上的时刻
- * （面板上要出现批准入口）。
+ * 灵动岛在空闲阈值上消失了——而那正是需要它留在屏幕上的时刻。
  *
  * 与 `phaseIdleTimeout` 的关键区别：那个阶段直接向 helper 写 NDJSON，**绕开了
- * 插件**，因此无法覆盖任何状态机逻辑。这里必须驱动真插件，因为要验证的
- * 正是"`approval/asked` 置位挂起 → 看门狗不收起"这条状态机路径。
+ * 插件**，因此无法覆盖任何状态机逻辑。这里必须驱动真插件。
  *
- * 断言刻意成对：挂起期间**不收起**，`decided` 之后**仍能收起**。只测前者会
- * 把"永久抑制"当成修复——那是另一个 bug。
+ * 断言刻意成对：挂起期间**不收起**，裁决之后**仍能收起**。只测前者会把
+ * "永久抑制"当成修复——那是另一个 bug。
  */
 async function phaseApprovalHoldsIsland() {
   if (!windowChecksUsable) {
@@ -385,125 +449,113 @@ async function phaseApprovalHoldsIsland() {
 
   const idleMs = 5_000
   console.log(`\n== 审批挂起期间不收起（idleTimeoutMs=${idleMs}）==`)
-  const approvalSocket = join(dir, 'approval.sock')
-  const child = spawn(HELPER, ['--idle-timeout-ms', String(idleMs), approvalSocket], {
-    stdio: ['ignore', 'ignore', 'pipe'],
-    detached: true,
-  })
-  let approvalStderr = ''
-  child.stderr.on('data', (d) => { approvalStderr += d })
-
-  // 独立的 ctx 与监听器数组：主流程的 listeners 已经属于第一个实例，
-  // 混在一起会让"哪个实例收到了事件"变得含糊。
-  const ownListeners = []
-  const ownDisposers = []
-  const ownCtx = {
-    ...fakeCtx,
-    on: (name, listener) => { ownListeners.push({ name, listener }); return () => {} },
-    effect: (fn, label) => { const d = fn(); ownDisposers.push({ label, disposer: d }); return () => {} },
-  }
-
-  const waitFor = async (predicate, ms, label) => {
-    const until = Date.now() + ms
-    while (Date.now() < until) {
-      if (predicate()) return true
-      await sleep(150)
-    }
-    bad(`${label}：${ms}ms 内未满足`)
-    return false
-  }
-
-  /**
-   * 轮询窗口是否达到期望状态，返回是否达成。
-   *
-   * 断言用轮询而不是固定睡眠：helper 的收起是在它自己的看门狗到期后异步发生的，
-   * 固定睡眠要么太短（误报失败）要么太长（拖慢用例）。实测在 5s 阈值下，固定
-   * 5s 等待正好与它相撞，成了一个偶发失败。
-   */
-  const waitForWindow = async (predicate, ms, label) => {
-    const until = Date.now() + ms
-    while (Date.now() < until) {
-      if (predicate()) return true
-      await sleep(200)
-    }
-    bad(`${label}：${ms}ms 内未满足`)
-    return false
-  }
+  const phase = await startIsolatedPhase('approval', idleMs, 'approval.sock')
+  if (phase === null) return
 
   try {
-    if (!await waitFor(() => existsSync(approvalSocket), 8_000, 'socket 出现')) return
+    phase.emit('session/created', { id: 'approval-e2e' })
+    phase.emit('session/event', { id: 'approval-e2e' }, { type: 'turn/start', data: { turn: 1 } })
 
-    // 用 query string 绕开 ESM 缓存，拿到**独立的模块实例**。
-    //
-    // 这一步不是洁癖：`src/activity.ts` 把"当前跟踪哪个会话"存在模块级变量里，
-    // 所以第二次 `apply()` 会与第一个实例共享它——新会话被当作"不是我们的会话"
-    // 而忽略。更麻烦的是各实例的日志会汇到同一个数组，诊断时无法区分是谁在说话
-    // （实测在那上面浪费了一轮排查）。独立实例后每个阶段都是干净的世界。
-    const freshMod = await import(new URL(`file://${join(ROOT, 'src', 'index.ts')}?phase=approval`).href)
-
-    // 插件用同一个 idle 阈值，才能与 helper 的收起时机对齐。
-    freshMod.apply(ownCtx, {
-      socketPath: approvalSocket,
-      helperPath: HELPER,
-      connectTimeoutMs: 15_000,
-      idleTimeoutMs: idleMs,
-      graceMs: 3_000,
-    })
-
-    const emit = (name, ...args) => {
-      for (const l of ownListeners) if (l.name === name) l.listener(...args)
-    }
-
-    emit('session/created', { id: 'approval-e2e' })
-    emit('session/event', { id: 'approval-e2e' }, { type: 'turn/start', data: { turn: 1 } })
-
-    const approvalPid = await waitForHelperPid(() => approvalStderr)
-    if (!await waitFor(() => windowCount(approvalPid) > 0, 6_000, 'turn/start 后窗口出现')) return
+    if (!await waitForWindowState(() => windowCount(phase.pid) > 0, 6_000, 'turn/start 后窗口出现')) return
     ok('turn/start 后窗口出现')
 
-    emit('session/event', { id: 'approval-e2e' }, {
+    phase.emit('session/event', { id: 'approval-e2e' }, {
       type: 'approval/asked',
       data: { id: 'req-1', toolName: 'bash', callId: 'call_1', reason: 'escalate sandbox' },
     })
 
-    // 挂起期间静默，等满一个空闲周期再多给 2s。
-    //
-    // 必须**超过**整整一个空闲周期：否则看门狗还没触发过，窗口"仍在"什么也证明
-    // 不了。第一个版本就栽在这里——固定睡眠正好与 decided 相撞，断言在一个已经
-    // 不挂起的时刻采样，读成"窗口消失"，看起来像插件 bug。
+    // 必须**超过**整整一个空闲周期，否则看门狗还没触发过，窗口"仍在"什么也证明不了。
     const holdStart = Date.now()
     await sleep(idleMs + 2_000)
     const held = (Date.now() - holdStart) / 1000
-    if (windowCount(approvalPid) > 0) {
+    if (windowCount(phase.pid) > 0) {
       ok(`审批挂起期间静默 ${held.toFixed(1)}s（超过空闲阈值）窗口仍在——两侧看门狗都被心跳刷新`)
     } else {
-      bad('审批挂起期间窗口消失了——挂起期间没有维持心跳（这正是已修复的故障）')
+      bad('审批挂起期间窗口消失了——挂起期间没有维持心跳')
     }
 
-    // 配对断言：解除挂起后必须恢复正常的空闲收起，否则就是永久抑制。
-    emit('session/event', { id: 'approval-e2e' }, {
+    phase.emit('session/event', { id: 'approval-e2e' }, {
       type: 'approval/decided',
       data: { id: 'req-1', outcome: 'allowed-once' },
     })
-    const collapsed = await waitForWindow(
-      () => windowCount(approvalPid) === 0,
-      idleMs * 3,
-      'approval/decided 后窗口自动收起',
-    )
-    if (collapsed) ok('approval/decided 之后空闲超时恢复正常，窗口自动收起（不是永久抑制）')
-  } finally {
-    for (const { disposer } of ownDisposers) {
-      if (typeof disposer === 'function') { try { await disposer() } catch { /* best effort */ } }
+    if (await waitForWindowState(() => windowCount(phase.pid) === 0, idleMs * 3, 'approval/decided 后窗口自动收起')) {
+      ok('approval/decided 之后空闲超时恢复正常，窗口自动收起（不是永久抑制）')
     }
-    try { process.kill(-child.pid, 'SIGKILL') } catch { /* already gone */ }
-    await sleep(200)
-    rmSync(approvalSocket, { force: true })
+  } finally {
+    await phase.cleanup()
+  }
+}
+
+/**
+ * 一次阻塞在用户身上的普通工具调用，同样不得被空闲超时收起。
+ *
+ * 这条用例来自第二个真实故障，它也证明了只测一条路径有多危险：修复第一版只
+ * 覆盖「未决审批」，用户在选项界面上停留时灵动岛仍然消失。会话日志给出了确凿
+ * 数据——`ask_user_question` 的 `tool/call` 与 `tool/result` 相隔 219 秒，
+ * 期间**没有任何 `approval/*` 事件**，所以以审批为条件的心跳完全不适用。
+ *
+ * 判据因此从「是否在等审批」放宽为「是否有事情悬而未决」。这条用例专测第二种。
+ */
+async function phaseToolWaitHoldsIsland() {
+  if (!windowChecksUsable) {
+    skipped++
+    console.log('\n== 工具等待期间不收起：跳过（无窗口探针）——跳过不算通过 ==')
+    return
+  }
+
+  const idleMs = 5_000
+  console.log(`\n== 工具等待期间不收起（idleTimeoutMs=${idleMs}）==`)
+  const phase = await startIsolatedPhase('toolwait', idleMs, 'toolwait.sock')
+  if (phase === null) return
+
+  try {
+    phase.emit('session/created', { id: 'toolwait-e2e' })
+    phase.emit('session/event', { id: 'toolwait-e2e' }, { type: 'turn/start', data: { turn: 1 } })
+
+    if (!await waitForWindowState(() => windowCount(phase.pid) > 0, 6_000, 'turn/start 后窗口出现')) return
+    ok('turn/start 后窗口出现')
+
+    // `tools/pre-execute` 是中间件，必须给 `next` 续延——真实宿主会传，这里也要传，
+    // 否则插件里 `return next()` 会抛 TypeError。这个续延同时是断言点：插件必须
+    // 原样直通，认领就等于拦截了工具调用。
+    let prePassed = false
+    phase.emit('tools/pre-execute', {
+      callId: 'call_waiting',
+      name: 'AskUserQuestion',
+      arguments: { question: '请选择' },
+    }, async () => { prePassed = true; return { kind: 'allow' } })
+    await sleep(100)
+    if (prePassed) ok('pre-execute 直通（没有拦截工具调用）')
+    else bad('pre-execute 没有调用 next() —— 会拦截会话内所有工具调用')
+
+    const holdStart = Date.now()
+    await sleep(idleMs + 2_000)
+    const held = (Date.now() - holdStart) / 1000
+    if (windowCount(phase.pid) > 0) {
+      ok(`工具等待期间静默 ${held.toFixed(1)}s（超过空闲阈值）窗口仍在——未决的工具调用维持了心跳`)
+    } else {
+      bad('工具等待期间窗口消失了——心跳漏掉了阻塞在用户身上的工具调用')
+    }
+
+    let postPassed = false
+    phase.emit('tools/post-execute', { callId: 'call_waiting', name: 'AskUserQuestion' }, {},
+      async () => { postPassed = true; return { kind: 'accept' } })
+    await sleep(100)
+    if (postPassed) ok('post-execute 直通（没有拦截结果）')
+    else bad('post-execute 没有调用 next()')
+
+    if (await waitForWindowState(() => windowCount(phase.pid) === 0, idleMs * 3, '工具返回后窗口自动收起')) {
+      ok('工具返回后空闲超时恢复正常，窗口自动收起（不是永久抑制）')
+    }
+  } finally {
+    await phase.cleanup()
   }
 }
 
 await phaseIdleTimeout()
 await phaseNewTurnDuringHide()
 await phaseApprovalHoldsIsland()
+await phaseToolWaitHoldsIsland()
 
 rmSync(dir, { recursive: true, force: true })
 

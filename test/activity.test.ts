@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { ProgressMachine } from '../src/progress.ts'
+import { reduceSessionEvent } from '../src/events.ts'
 import {
   reduceActivityEvent,
   onToolPreExecute,
@@ -269,4 +270,82 @@ test('新 turn 清空进行中的工具与子代理，避免跨回合残留', ()
   m.startTurn(2)
   assert.equal(m.snapshot().currentTask, undefined)
   assert.equal(m.snapshot().subagentCount, 0)
+})
+
+// `reduceSessionEvent` 期待持久化事件的形状 `{ type, data }`；
+// `reduceActivityEvent` 直接收 payload。两者签名不同，别混用。
+const ev = (type: string, data: unknown) => ({ type, data })
+
+// ---------------------------------------------------------------------------
+// hasOutstandingWork —— 灵动岛的活性判据
+//
+// 这条判据是唯一决定"岛该不该在屏幕上"的东西，而它已经因为看得太窄而出过
+// 两次故障：先是只认「未决审批」，于是普通工具调用（ask_user_question 阻塞
+// 219 秒）期间岛被收起；再往前，是只认 agent/status 的 running。
+// 所以这里把三种"悬而未决"逐条钉住，并确保它们都能回到 false——
+// 只会变 true 的判据等于永不收起。
+// ---------------------------------------------------------------------------
+
+test('hasOutstandingWork：工具进行中为真，结束后回到假', () => {
+  const m = fresh()
+  assert.equal(m.hasOutstandingWork(), false, 'turn/start 后没有未决工作是正常的')
+
+  onToolPreExecute(m, { callId: 'c1', name: 'Bash', arguments: { command: 'ls' } })
+  assert.equal(m.hasOutstandingWork(), true, '工具进行中必须有未决工作')
+
+  onToolPostExecute(m, { callId: 'c1', name: 'Bash' })
+  assert.equal(m.hasOutstandingWork(), false, '工具结束后必须回到假，否则永不收起')
+})
+
+test('hasOutstandingWork：未决审批为真，裁决后回到假', () => {
+  const m = fresh()
+  reduceSessionEvent(m, ev('approval/asked', { id: 'r1', toolName: 'bash' }))
+  assert.equal(m.hasOutstandingWork(), true)
+
+  reduceSessionEvent(m, ev('approval/decided', { id: 'r1', outcome: 'rejected' }))
+  assert.equal(m.hasOutstandingWork(), false)
+})
+
+test('hasOutstandingWork：agent 在运行为真', () => {
+  const m = fresh()
+  onAgentStatus(m, { agent: { session: { id: 'ours' } }, status: 'running' })
+  // 该调用的会话过滤依赖模块级跟踪状态，所以先建立跟踪。
+  const m2 = fresh()
+  reduceActivityEvent(m2, 'session/created', { session: { id: 'ours' } })
+  onAgentStatus(m2, { agent: { session: { id: 'ours' } }, status: 'running' })
+  assert.equal(m2.hasOutstandingWork(), true)
+  onAgentStatus(m2, { agent: { session: { id: 'ours' } }, status: 'idle' })
+  assert.equal(m2.hasOutstandingWork(), false)
+  // 未跟踪的会话不得影响本机状态。
+  assert.equal(m.hasOutstandingWork(), false)
+})
+
+test('hasOutstandingWork：多种未决同时存在时，清掉一个仍为真', () => {
+  const m = fresh()
+  reduceSessionEvent(m, ev('approval/asked', { id: 'r1', toolName: 'bash' }))
+  onToolPreExecute(m, { callId: 'c1', name: 'Bash', arguments: { command: 'ls' } })
+  assert.equal(m.hasOutstandingWork(), true)
+
+  onToolPostExecute(m, { callId: 'c1', name: 'Bash' })
+  assert.equal(m.hasOutstandingWork(), true, '审批仍未决')
+
+  reduceSessionEvent(m, ev('approval/decided', { id: 'r1', outcome: 'allowed-once' }))
+  assert.equal(m.hasOutstandingWork(), false, '全部结清后才回到假')
+})
+
+test('hasOutstandingWork：新 turn 清空，不跨回合残留', () => {
+  const m = fresh()
+  onToolPreExecute(m, { callId: 'c1', name: 'Bash', arguments: { command: 'ls' } })
+  reduceSessionEvent(m, ev('approval/asked', { id: 'r1', toolName: 'bash' }))
+  assert.equal(m.hasOutstandingWork(), true)
+
+  reduceSessionEvent(m, ev('turn/start', { turn: 2 }))
+  assert.equal(m.hasOutstandingWork(), false, '新回合必须结清上一回合的未决状态')
+})
+
+test('hasOutstandingWork：reset 后为假', () => {
+  const m = fresh()
+  onToolPreExecute(m, { callId: 'c1', name: 'Bash', arguments: { command: 'ls' } })
+  m.reset()
+  assert.equal(m.hasOutstandingWork(), false)
 })

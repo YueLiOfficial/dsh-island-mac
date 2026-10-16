@@ -285,19 +285,24 @@ export function apply(ctx: Context, config: Config): void {
         bumpIdle()
         return
       }
-      // A pending approval must not collapse EITHER watchdog.
+      // Outstanding work must not collapse EITHER watchdog.
       //
       // Both sides run an independent idle timeout that has to stay in step (see
       // `BridgeOptions.defaultIdleTimeoutMilliseconds`): the plugin's closes the
-      // island by sending `bye`, and the helper closes the WINDOW on its own.
-      // So merely suppressing our own timer is not enough — staying silent kills
-      // the island from the helper side. A real multi-minute approval wait showed
-      // exactly that, and it is why the first fix here was incomplete.
+      // island by sending `bye`, and the helper closes the WINDOW on its own. So
+      // merely suppressing our own timer is not enough — staying silent kills the
+      // island from the helper side. A real multi-minute approval wait showed
+      // exactly that, which is why suppressing alone was incomplete.
       //
-      // Instead of suppressing, emit a low-rate heartbeat that refreshes both.
-      // It carries the state the panel already shows, so it costs one small
-      // frame per idle period rather than a stream.
-      if (snapshot.approvalPending) {
+      // Guards against BOTH wait shapes found so far: a pending approval, and an
+      // ordinary tool call that blocks on the user (`ask_user_question` sat in
+      // flight for 219s with no approval event at all). Keying on the approval
+      // alone covered only the first, so the island still vanished in the second.
+      //
+      // Instead of suppressing, emit a low-rate heartbeat that refreshes both
+      // watchdogs. It carries the state the panel already shows, so it costs one
+      // small frame per idle period rather than a stream.
+      if (machine.hasOutstandingWork()) {
         send({
           type: 'progress',
           percent: snapshot.percent,

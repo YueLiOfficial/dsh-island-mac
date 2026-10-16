@@ -120,6 +120,26 @@ export class ProgressMachine {
   private pendingApprovals: string[] = []
 
   /**
+   * Whether work is outstanding, i.e. something is expected to arrive later.
+   *
+   * This is the island's liveness signal, and it is deliberately broader than
+   * `approvalPending`. A pending approval was only the FIRST case found; the
+   * second was an ordinary tool call that blocks on the user — in a real session
+   * `ask_user_question` stayed in flight for 219 seconds with no `approval/*`
+   * event at all, so an approval-keyed heartbeat let the island collapse
+   * mid-wait. Any in-flight tool call is such a wait, which also covers long
+   * builds and downloads.
+   *
+   * Deliberately NOT "the turn is open": a turn whose process half-dies stays
+   * open forever, and the idle timeout is the only thing that recovers from that
+   * (a half-open socket never produces EOF). Requiring an actual pending tool or
+   * approval keeps that safety net intact.
+   */
+  hasOutstandingWork(): boolean {
+    return this.pendingApprovals.length > 0 || this.inFlight.length > 0 || this.agentRunning
+  }
+
+  /**
    * Begin a new turn. Resets to the 5% floor and clears any precise lock —
    * progress is per-turn, so last turn's precise value must not leak forward.
    *
