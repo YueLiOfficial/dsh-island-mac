@@ -193,6 +193,7 @@ cat "$HOME/Library/Application Support/dsh-island/plugin-applied.json"
 | `helperPath` | `<包目录>/bin/DynamicIslandBridge` | 原生辅助进程 |
 | `connectTimeoutMs` | `10000` | 等待辅助进程就绪的时长 |
 | `idleTimeoutMs` | `120000` | 无更新多久后自动收起 |
+| `lingerMs` | `1200` | 任务完成后 100% 停留多久再收起（默认 1.2 秒，几乎一闪而过；想看清就调大） |
 | `graceMs` | `3000` | SIGTERM 后等多久升级为 SIGKILL |
 
 ## ⚠️ 无刘海机型的行为差异

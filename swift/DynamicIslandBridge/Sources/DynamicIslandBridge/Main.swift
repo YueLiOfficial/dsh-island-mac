@@ -52,6 +52,7 @@ enum DynamicIslandBridgeMain {
         let buffer = ProgressBuffer()
         let controller = NotchController(
             buffer: buffer,
+            lingerMilliseconds: options.lingerMilliseconds,
             idleTimeoutMilliseconds: options.idleTimeoutMilliseconds
         )
         controller.start()

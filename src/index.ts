@@ -50,6 +50,14 @@ export interface Config {
   helperPath?: string
   connectTimeoutMs?: number
   idleTimeoutMs?: number
+  /**
+   * How long the finished state stays on screen before collapsing, in ms.
+   *
+   * Lives on the Swift side because the linger is an animation concern, so it is
+   * relayed to the helper as a command-line flag. Defaults to the helper's own
+   * default; raised here only when a user asks for a longer look at 100%.
+   */
+  lingerMs?: number
   graceMs?: number
 }
 
@@ -58,6 +66,7 @@ export const Config: Schema<Config> = Schema.object({
   helperPath: Schema.string().default(''),
   connectTimeoutMs: Schema.number().default(10_000),
   idleTimeoutMs: Schema.number().default(120_000),
+  lingerMs: Schema.number().default(1_200),
   graceMs: Schema.number().default(3_000),
 })
 
@@ -147,6 +156,7 @@ export function apply(ctx: Context, config: Config): void {
   const helperPath = config.helperPath && config.helperPath.length > 0 ? config.helperPath : defaultHelperPath()
   const connectTimeoutMs = config.connectTimeoutMs ?? 10_000
   const idleTimeoutMs = config.idleTimeoutMs ?? 120_000
+  const lingerMs = config.lingerMs ?? 1_200
   const graceMs = config.graceMs ?? 3_000
 
   const log = ctx.logger(name)
@@ -160,6 +170,9 @@ export function apply(ctx: Context, config: Config): void {
     helperPath,
     socketPath,
     connectTimeoutMs,
+    // Relay the linger to the helper: the wait-then-collapse animation lives in
+    // Swift, so this is the only way the config can reach it.
+    helperArgs: ['--linger-ms', String(lingerMs)],
     graceMs,
     onStderr: (line) => log.warn('island helper: %s', line),
   })
