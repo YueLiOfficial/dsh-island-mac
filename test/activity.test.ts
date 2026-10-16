@@ -391,3 +391,102 @@ test('agentRunning 仍然被记录（供未来使用），但不参与活性判�
   assert.equal(m.snapshot().agentRunning, true, '字段本身仍应如实反映状态')
   assert.equal(m.hasOutstandingWork(), false, '但它不是活性来源')
 })
+
+// ---------------------------------------------------------------------------
+// 回归：待办标签不得被当成"未决工作"
+//
+// 实测故障（截图证据）：任务结束后灵动岛卡在 100%，「当前任务」显示的是待办文案
+// `Clean up and final health check`——那正是 todo/write 的 in_progress 项。
+//
+// 根因：setCurrentTask 把待办文案作为一条**伪 callId 的 in-flight 记录**塞进列表，
+// 而这条记录永远不会被移除——没有任何工具会让你 post-execute 掉一个待办。于是
+// hasOutstandingWork() 恒为真，心跳无限续期，岛永不收起（直到下一个 turn/start）。
+// ---------------------------------------------------------------------------
+
+test('回归：待办标签不构成未决工作（否则回合结束后岛永久不收）', () => {
+  const m = fresh()
+  reduceSessionEvent(m, ev('todo/write', {
+    todos: [
+      { content: 'Clean up and final health check', status: 'in_progress' },
+      { content: '其它事项', status: 'pending' },
+    ],
+  }))
+  assert.match(m.snapshot().currentTask ?? '', /Clean up/, '待办标签应当显示')
+
+  // 一个完整回合结束后，标签可以留着，但不得构成未决工作。
+  reduceSessionEvent(m, ev('turn/end', { turn: 1, reason: { kind: 'completed' } }))
+  assert.equal(
+    m.hasOutstandingWork(), false,
+    '待办标签描述的是「在做什么」，不是「有什么悬而未决」；把它算进去会让岛永久不收',
+  )
+})
+
+test('工具进行中仍然构成未决工作（待办标签的修正不能削弱这一点）', () => {
+  const m = fresh()
+  reduceSessionEvent(m, ev('todo/write', {
+    todos: [{ content: '某任务', status: 'in_progress' }],
+  }))
+  assert.equal(m.hasOutstandingWork(), false, '只有待办时不算未决')
+
+  onToolPreExecute(m, { callId: 'c1', name: 'Bash', arguments: { command: 'ls' } })
+  assert.equal(m.hasOutstandingWork(), true, '真的工具在进行中才算未决')
+
+  onToolPostExecute(m, { callId: 'c1', name: 'Bash' })
+  assert.equal(m.hasOutstandingWork(), false, '工具结束后回到未决=false')
+})
+
+test('真实工具调用优先于待办标签显示（待办是概览，工具是当下）', () => {
+  const m = fresh()
+  reduceSessionEvent(m, ev('todo/write', {
+    todos: [{ content: '实现悬停标签', status: 'in_progress' }],
+  }))
+  assert.equal(m.snapshot().currentTask, '实现悬停标签')
+
+  onToolPreExecute(m, { callId: 'c1', name: 'Bash', arguments: { command: 'pnpm test', description: '运行测试' } })
+  assert.equal(m.snapshot().currentTask, '运行测试', '具体工具比待办概览更贴近「此刻在做什么」')
+
+  onToolPostExecute(m, { callId: 'c1', name: 'Bash' })
+  assert.equal(m.snapshot().currentTask, '实现悬停标签', '工具结束后回退到待办标签')
+})
+
+test('新回合清空待办标签，避免跨回合残留', () => {
+  const m = fresh()
+  reduceSessionEvent(m, ev('todo/write', {
+    todos: [{ content: '上一回合的事', status: 'in_progress' }],
+  }))
+  reduceSessionEvent(m, ev('turn/start', { turn: 2 }))
+  assert.equal(m.snapshot().currentTask, undefined)
+})
+
+test('turn/end 清空进行中的工具与 agentRunning（纵深防御，防永久残留）', () => {
+  // 两种会让 hasOutstandingWork() 永久为真、从而让岛永不收起的形状：
+  //   1. 有 pre-execute 却没有配对的 post-execute（工具崩了、callId 不匹配）
+  //   2. agent/status 报了 running 却再也没有 idle 转换
+  // turn/end 是权威边界——回合都结束了，不可能还有"仍在进行的工作"。
+  const m = fresh()
+  reduceActivityEvent(m, 'session/created', { session: { id: 'ours' } })
+  onAgentStatus(m, { agent: { session: { id: 'ours' } }, status: 'running' })
+  onToolPreExecute(m, { callId: 'never-finished', name: 'Bash', arguments: { command: 'ls' } })
+  assert.equal(m.hasOutstandingWork(), true, '前提：确实处于未决状态')
+
+  reduceSessionEvent(m, ev('turn/end', { turn: 1, reason: { kind: 'completed' } }))
+  assert.equal(m.hasOutstandingWork(), false, '回合结束后不得仍有残留的未决工作')
+  assert.equal(m.snapshot().agentRunning, false)
+})
+
+test('start 与 finish 必须用同一个 key，否则条目无法移除', () => {
+  // 这是一条契约测试：两侧的 key 派生规则必须一致。若哪天有人只改一边
+  // （例如给 post 也加了"用工具名兜底"却改了规则），条目会永久残留、
+  // 岛永不收起，而且不会有任何报错。
+  const m = fresh()
+  onToolPreExecute(m, { callId: 'c1', name: 'Bash', arguments: {} })
+  assert.equal(m.hasOutstandingWork(), true)
+  onToolPostExecute(m, { callId: 'c1', name: 'Bash' })
+  assert.equal(m.hasOutstandingWork(), false, '同一个 callId 必须能移除')
+
+  // 两侧都缺 callId 时，都退化为用工具名——规则一致才可移除。
+  onToolPreExecute(m, { name: 'Read', arguments: {} })
+  assert.equal(m.hasOutstandingWork(), true)
+  onToolPostExecute(m, { name: 'Read' })
+  assert.equal(m.hasOutstandingWork(), false, '缺 callId 时的兜底规则也必须一致')
+})

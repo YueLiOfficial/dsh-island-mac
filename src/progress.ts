@@ -63,14 +63,6 @@ const TURN_START_PERCENT = 0.05
  */
 export const ESTIMATE_CEILING = 0.9
 
-/**
- * Pseudo call id for the todo-derived label.
- *
- * It lives in the same in-flight stack as tool labels so both participate in one
- * priority order, but it has no real `tools/post-execute` to remove it. A
- * distinctive value guarantees no tool's `callId` can accidentally clear it.
- */
-const TODO_LABEL_ID = 'todo:in-progress'
 
 /** A tool call that has started but not yet finished. */
 interface InFlightTool {
@@ -118,6 +110,18 @@ export class ProgressMachine {
   private agentRunning = false
   /** Ids of approvals asked but not yet decided. Non-empty ⇒ a human is deciding. */
   private pendingApprovals: string[] = []
+  /**
+   * Label derived from the todo list's `in_progress` item, when there is one.
+   *
+   * Deliberately NOT stored in `inFlight`. It used to be, as an entry with a
+   * pseudo call id so both labels shared one priority order — but nothing ever
+   * removes that entry: there is no `tools/post-execute` for a todo. Once a todo
+   * went `in_progress`, `hasOutstandingWork()` stayed true forever, the heartbeat
+   * renewed itself, and the island never collapsed (observed as a bar stuck at
+   * 100% showing the todo text). A todo describes what work IS, not what is
+   * pending, so it must not count as outstanding work.
+   */
+  private todoLabel: string | undefined = undefined
   /**
    * What the FIRST pending approval is about, e.g. "bash · escalate sandbox".
    *
@@ -186,6 +190,7 @@ export class ProgressMachine {
     this.subagents = []
     this.pendingApprovals = []
     this.approvalDetail = undefined
+    this.todoLabel = undefined
     this.turn = turn
     this.ok = true
     return this.snapshot()
@@ -206,11 +211,7 @@ export class ProgressMachine {
    * text cannot blank a label that is already showing.
    */
   setCurrentTask(task: string | undefined): ProgressSnapshot {
-    if (task !== undefined && task.length > 0) {
-      // Modelled as an in-flight entry so it participates in the same stack as
-      // tool labels; `toolFinished` never removes this one (unknown callId).
-      this.inFlight = [{ callId: TODO_LABEL_ID, label: task }]
-    }
+    if (task !== undefined && task.length > 0) this.todoLabel = task
     return this.snapshot()
   }
 
@@ -332,11 +333,21 @@ export class ProgressMachine {
     } else {
       this.ok = false
     }
-    // Defence in depth. `agent/status` only fires on a real transition, so an
-    // agent that stays running never reports idle and this flag can stay set
-    // indefinitely. It is deliberately NOT part of `hasOutstandingWork` (see the
-    // note there — it deadlocked the watchdog), but clearing it at a turn boundary
-    // stops it lingering if future code ever consults it.
+    // `turn/end` is the authoritative turn boundary, so nothing recorded as
+    // "still running" can still be running. Clearing here is defence in depth
+    // against two failure shapes that both leave `hasOutstandingWork()` stuck
+    // true — and therefore leave the island on screen forever:
+    //
+    //  1. A `tools/pre-execute` whose `post-execute` never arrives, or whose
+    //     `callId` does not match (start and finish must key on the SAME id).
+    //  2. `agent/status` reporting running with no later transition to idle: the
+    //     loop only emits on a real change, so that flag can stay set forever.
+    //     It is deliberately not part of `hasOutstandingWork` (see the note
+    //     there), but it is cleared here so it cannot linger either.
+    //
+    // A genuinely live tool call does not reach here: the turn cannot end while
+    // one is in flight.
+    this.inFlight = []
     this.agentRunning = false
     return this.snapshot()
   }
@@ -351,6 +362,7 @@ export class ProgressMachine {
     this.agentRunning = false
     this.pendingApprovals = []
     this.approvalDetail = undefined
+    this.todoLabel = undefined
     this.turn = null
     this.ok = true
     return this.snapshot()
@@ -369,13 +381,16 @@ export class ProgressMachine {
     // act on, and while it is pending nothing else can progress anyway. The
     // detail ("bash · escalate sandbox") says WHICH decision is waiting, so the
     // user can judge without leaving the island.
+    // Priority: the approval is the one thing the user must act on; a running
+    // tool is more specific about "right now" than the todo list; the todo item
+    // is the best remaining overview of what the work is.
     const base = this.pendingApprovals.length > 0
       ? this.approvalDetail === undefined
         ? '等待批准'
         : `等待批准：${this.approvalDetail}`
       : this.inFlight.length > 0
         ? this.inFlight[this.inFlight.length - 1]!.label
-        : undefined
+        : this.todoLabel
     if (this.subagents.length <= 1) return base
     return base === undefined ? `${this.subagents.length} 个子代理运行中` : `${base} · ${this.subagents.length} 子代理`
   }

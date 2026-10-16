@@ -552,10 +552,71 @@ async function phaseToolWaitHoldsIsland() {
   }
 }
 
+/**
+ * 带未完成待办的回合结束后，窗口必须仍然收起。
+ *
+ * 这条用例来自第三个真实故障（用户截图）：「当前任务」显示的是待办文案
+ * `Clean up and final health check`，而岛卡在 100% 不消失。
+ *
+ * 根因：待办标签曾被当作一条 in-flight 记录存进「进行中的工具」列表，而那条记录
+ * **永远不会被移除**——没有任何工具会让你 post-execute 掉一个待办。于是
+ * hasOutstandingWork() 恒为真、心跳无限续期、岛永不收起。
+ *
+ * 此前的保持在屏用例都不涉及待办，所以结构上就不可能发现它。这条补上那个缺口：
+ * 注入一个 in_progress 待办（制造"有未决工作"的假象），再让回合正常结束，断言
+ * 窗口仍然收起。
+ */
+async function phaseTodoLabelDoesNotKeepIslandUp() {
+  if (!windowChecksUsable) {
+    skipped++
+    console.log('\n== 待办标签不阻止收起：跳过（无窗口探针）——跳过不算通过 ==')
+    return
+  }
+
+  const idleMs = 5_000
+  console.log(`\n== 待办标签不阻止收起（idleTimeoutMs=${idleMs}）==`)
+  const phase = await startIsolatedPhase('todolabel', idleMs, 'todolabel.sock')
+  if (phase === null) return
+
+  try {
+    phase.emit('session/created', { id: 'todolabel-e2e' })
+    phase.emit('session/event', { id: 'todolabel-e2e' }, { type: 'turn/start', data: { turn: 1 } })
+
+    if (!await waitForWindowState(() => windowCount(phase.pid) > 0, 6_000, 'turn/start 后窗口出现')) return
+    ok('turn/start 后窗口出现')
+
+    // 制造「有一个待办正在进行」的状态：这正是导致假阳性的输入。
+    phase.emit('session/event', { id: 'todolabel-e2e' }, {
+      type: 'todo/write',
+      data: { todos: [{ content: 'Clean up and final health check', status: 'in_progress' }] },
+    })
+
+    // 回合正常结束。此时不应再有任何「悬而未决」的东西。
+    phase.emit('session/event', { id: 'todolabel-e2e' }, {
+      type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } },
+    })
+
+    // linger 约 1.2s + 一个空闲周期。给足余量。
+    const collapsed = await waitForWindowState(
+      () => windowCount(phase.pid) === 0,
+      idleMs * 2 + 3_000,
+      '回合结束后窗口自动收起',
+    )
+    if (collapsed) {
+      ok('带未完成待办时，回合结束后窗口仍自动收起（待办标签未被视为未决工作）')
+    } else {
+      bad('窗口未收起——待办标签被当成了未决工作，心跳无限续期（这正是截图里的卡死）')
+    }
+  } finally {
+    await phase.cleanup()
+  }
+}
+
 await phaseIdleTimeout()
 await phaseNewTurnDuringHide()
 await phaseApprovalHoldsIsland()
 await phaseToolWaitHoldsIsland()
+await phaseTodoLabelDoesNotKeepIslandUp()
 
 rmSync(dir, { recursive: true, force: true })
 
